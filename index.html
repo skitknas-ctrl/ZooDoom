@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>ZooDoom</title>
+<style>
+  html, body { margin:0; padding:0; background:#15131a; height:100%; overflow:hidden; touch-action:none;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  #wrap { position:fixed; inset:0; padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px); display:flex; align-items:center; justify-content:center; }
+  canvas { display:block; background:#15131a; }
+  #settings { position:fixed; inset:0; background:rgba(0,0,0,.78); display:none; align-items:center; justify-content:center; z-index:10; }
+  #settings .box { background:#2a2733; color:#eee; padding:18px 20px; border-radius:14px; width:min(92vw,420px); max-height:88vh; overflow:auto; }
+  #settings h2 { margin:0 0 10px; font-size:20px; }
+  #settings label { display:block; margin:12px 0 4px; font-size:14px; }
+  #settings input[type=range] { width:100%; }
+  #settings .row { display:flex; justify-content:space-between; align-items:center; }
+  #settings button { margin-top:16px; padding:10px 16px; border:0; border-radius:8px; background:#f0b429; font-weight:700; font-size:15px; }
+  #settings button.sec { background:#555; color:#fff; margin-left:8px; }
+  .hint { font-size:12px; color:#bbb; margin-top:2px; }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c"></canvas></div>
+
+<div id="settings">
+  <div class="box">
+    <h2>Inställningar</h2>
+    <label class="row"><span>Vänster halva måste vara löst till</span><b id="v_left"></b></label>
+    <input type="range" id="s_left" min="0" max="100" step="5">
+    <div class="hint">Procent av vänstra halvans rutor som måste vara rensade innan högra halvan låses upp.</div>
+
+    <label class="row"><span>Sekunder mellan mynt</span><b id="v_coin"></b></label>
+    <input type="range" id="s_coin" min="0.2" max="3" step="0.1">
+
+    <label class="row"><span>Pumpens kapacitet (liter/s)</span><b id="v_pump"></b></label>
+    <input type="range" id="s_pump" min="0" max="6" step="0.25">
+
+    <label class="row"><span>Mål: liter i kontoret</span><b id="v_goal"></b></label>
+    <input type="range" id="s_goal" min="40" max="400" step="10">
+
+    <label class="row"><span>Svårigheten ökar var 20:e sekund</span><input type="checkbox" id="s_ramp"></label>
+    <label class="row"><span>Bricka får skjutas in i tomrum</span><input type="checkbox" id="s_slide"></label>
+    <div class="hint">Av = bara klassiska byten som ger tre i rad.</div>
+
+    <div>
+      <button id="b_save">Spara &amp; starta om</button>
+      <button id="b_close" class="sec">Stäng</button>
+      <button id="b_reset" class="sec">Återställ</button>
+    </div>
+  </div>
+</div>
+
+<script>
+'use strict';
+// ------------------------------------------------------------
+// ZooDoom – prototyp. Logisk yta 540x1000, skalas till skärmen.
+// ------------------------------------------------------------
+const W = 540, H = 1000;
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+const DEFAULTS = { leftPct: 40, coinInterval: 0.9, pumpRate: 1.5, goal: 120, ramp: true, slide: true };
+let S = loadSettings();
+function loadSettings() {
+  try { const j = JSON.parse(localStorage.getItem('zoodoom.settings') || 'null'); if (j) return Object.assign({}, DEFAULTS, j); } catch (e) {}
+  return Object.assign({}, DEFAULTS);
+}
+function saveSettings() { try { localStorage.setItem('zoodoom.settings', JSON.stringify(S)); } catch (e) {} }
+
+// --- Geometri (logiska pixlar) ---
+const BOARD = { x: 30, y: 320, cols: 8, rows: 8, cell: 60 };
+BOARD.w = BOARD.cols * BOARD.cell; BOARD.h = BOARD.rows * BOARD.cell;      // 480 x 480
+const MID_COL = BOARD.cols / 2;                                             // halvvägg mellan kol 3 och 4
+const WALL_ROW = BOARD.rows / 2;                                            // väggen går från golvet upp till mitten
+const CAVE = { top: 60, floorY: 300 };                                      // bassängens vatten mellan 150 och 300
+const BASIN = { top: 150, bottom: 300, cap: 100 };                          // liter
+const OFFICE = { y: 812, h: 128 };                                          // 812..940
+const BAR = { y: 940, h: 60 };
+const CELL_CAP = 5;                                                         // liter per tomrum på brädet
+
+const ANIMALS = ['🐼', '🦁', '🐘', '🐰', '🐧', '🐸'];
+const COLORS = ['#e8f3ff', '#ffd97a', '#9ad1ff', '#ffc4e1', '#cfd8ff', '#b8f2a8'];
+
+// --- Speltillstånd ---
+let G;
+function newGame() {
+  G = {
+    board: [], basin: 0, office: 0, score: 0, coins: 0, t: 0, over: false, won: false,
+    coinTimer: 0, coinInterval: S.coinInterval, rightUnlocked: S.leftPct <= 0,
+    particles: [], splashes: [], flashes: [], sel: null, drag: null, msg: '', msgT: 0,
+    power: { hammer: 3, bomb: 2, shuffle: 2 }, tool: null, pumpPhase: 0
+  };
+  for (let r = 0; r < BOARD.rows; r++) {
+    G.board[r] = [];
+    for (let c = 0; c < BOARD.cols; c++) {
+      let t;
+      do { t = (Math.random() * ANIMALS.length) | 0; }
+      while ((c >= 2 && G.board[r][c - 1].t === t && G.board[r][c - 2].t === t) ||
+             (r >= 2 && G.board[r - 1][c].t === t && G.board[r - 2][c].t === t));
+      G.board[r][c] = { t, w: 0 };           // t = -1 betyder tomrum; w = liter/CELL_CAP (0..1)
+    }
+  }
+  say('Rensa vänstra halvan så vattnet rinner undan!', 3);
+}
+function say(m, sec) { G.msg = m; G.msgT = sec; }
+
+const isHole = (r, c) => G.board[r][c].t < 0;
+const inBoard = (r, c) => r >= 0 && r < BOARD.rows && c >= 0 && c < BOARD.cols;
+const isLocked = (r, c) => !G.rightUnlocked && c >= MID_COL;
+const wallBetween = (r, c1, c2) => r >= WALL_ROW && Math.min(c1, c2) === MID_COL - 1 && Math.max(c1, c2) === MID_COL;
+
+function leftSolvedPct() {
+  let n = 0;
+  for (let r = 0; r < BOARD.rows; r++) for (let c = 0; c < MID_COL; c++) if (isHole(r, c)) n++;
+  return 100 * n / (BOARD.rows * MID_COL);
+}
+
+// --- Matchning ---
+function findMatches() {
+  const set = new Set();
+  for (let r = 0; r < BOARD.rows; r++) {
+    let run = 1;
+    for (let c = 1; c <= BOARD.cols; c++) {
+      const same = c < BOARD.cols && !isHole(r, c) && !isLocked(r, c) && !isLocked(r, c - 1) && G.board[r][c].t === G.board[r][c - 1].t;
+      if (same) run++;
+      else { if (run >= 3 && !isHole(r, c - 1)) for (let k = c - run; k < c; k++) set.add(r * 16 + k); run = 1; }
+    }
+  }
+  for (let c = 0; c < BOARD.cols; c++) {
+    let run = 1;
+    for (let r = 1; r <= BOARD.rows; r++) {
+      const same = r < BOARD.rows && !isHole(r, c) && !isLocked(r, c) && G.board[r][c].t === G.board[r - 1][c].t;
+      if (same) run++;
+      else { if (run >= 3 && !isHole(r - 1, c)) for (let k = r - run; k < r; k++) set.add(k * 16 + c); run = 1; }
+    }
+  }
+  return [...set].map(v => [v >> 4, v & 15]);
+}
+function clearCells(cells) {
+  if (!cells.length) return 0;
+  for (const [r, c] of cells) {
+    G.board[r][c].t = -1; G.board[r][c].w = 0;
+    G.flashes.push({ r, c, t: 0.35 });
+  }
+  G.score += 10 * cells.length + (cells.length > 3 ? 20 : 0);
+  if (!G.rightUnlocked && leftSolvedPct() >= S.leftPct) {
+    G.rightUnlocked = true; say('Högra halvan upplåst!', 2.5);
+  }
+  return cells.length;
+}
+function resolveMatches() {
+  let total = 0, m;
+  while ((m = findMatches()).length) total += clearCells(m);
+  return total;
+}
+function hasMove() {
+  for (let r = 0; r < BOARD.rows; r++) for (let c = 0; c < BOARD.cols; c++) {
+    for (const [dr, dc] of [[0, 1], [1, 0]]) {
+      const r2 = r + dr, c2 = c + dc;
+      if (!inBoard(r2, c2) || isLocked(r, c) || isLocked(r2, c2)) continue;
+      const a = G.board[r][c], b = G.board[r2][c2];
+      if (a.t < 0 && b.t < 0) continue;
+      if ((a.t < 0 || b.t < 0) && S.slide) return true;
+      [a.t, b.t] = [b.t, a.t];
+      const ok = findMatches().length > 0;
+      [a.t, b.t] = [b.t, a.t];
+      if (ok) return true;
+    }
+  }
+  return false;
+}
+function shuffleTiles() {
+  const pos = [], ts = [];
+  for (let r = 0; r < BOARD.rows; r++) for (let c = 0; c < BOARD.cols; c++)
+    if (!isHole(r, c) && !isLocked(r, c)) { pos.push([r, c]); ts.push(G.board[r][c].t); }
+  for (let tries = 0; tries < 50; tries++) {
+    for (let i = ts.length - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; [ts[i], ts[j]] = [ts[j], ts[i]]; }
+    pos.forEach(([r, c], i) => G.board[r][c].t = ts[i]);
+    if (findMatches().length === 0 && hasMove()) break;
+  }
+  resolveMatches();
+}
+
+// --- Spelardrag ---
+function tryMove(r1, c1, r2, c2) {
+  if (G.over || !inBoard(r1, c1) || !inBoard(r2, c2)) return;
+  if (Math.abs(r1 - r2) + Math.abs(c1 - c2) !== 1) return;
+  if (isLocked(r1, c1) || isLocked(r2, c2)) { say('Högra halvan är låst – lös vänstra först (' + leftSolvedPct().toFixed(0) + '/' + S.leftPct + ' %)', 2); return; }
+  if (wallBetween(r1, c1, c2)) { say('Väggen är i vägen', 1.5); return; }
+  const a = G.board[r1][c1], b = G.board[r2][c2];
+  if (a.t < 0 && b.t < 0) return;
+  const slide = a.t < 0 || b.t < 0;
+  if (slide && !S.slide) { say('Skjut inte brickor i tomrum (avstängt)', 1.5); return; }
+  // byt – både typ och vatten följer med tomrummet
+  [a.t, b.t] = [b.t, a.t]; [a.w, b.w] = [b.w, a.w];
+  const n = resolveMatches();
+  if (!slide && n === 0) { [a.t, b.t] = [b.t, a.t]; [a.w, b.w] = [b.w, a.w]; say('Ger ingen trea', 1); return; }
+  afterMove();
+}
+function afterMove() {
+  if (!hasMove()) { say('Inga drag kvar – blandar om', 2); shuffleTiles(); }
+}
+function useTool(r, c) {
+  if (isLocked(r, c)) { say('Låst', 1); return; }
+  if (G.tool === 'hammer' && !isHole(r, c)) {
+    G.power.hammer--; clearCells([[r, c]]); G.tool = null; afterMove();
+  } else if (G.tool === 'bomb') {
+    const cells = [];
+    for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) {
+      const rr = r + dr, cc = c + dc;
+      if (inBoard(rr, cc) && !isHole(rr, cc) && !isLocked(rr, cc) && !wallBetween(rr, c, cc)) cells.push([rr, cc]);
+    }
+    G.power.bomb--; clearCells(cells); G.tool = null; afterMove();
+  }
+}
+
+// --- Vatten ---
+function simWater(dt) {
+  // mynt -> bassäng sköts av partiklarna; pump:
+  G.pumpPhase += dt * (G.basin > 0 ? 6 : 1);
+  G.basin = Math.max(0, G.basin - S.pumpRate * dt);
+  // bassäng -> översta raden i vänstra halvan
+  for (let c = 0; c < MID_COL; c++) {
+    const cell = G.board[0][c];
+    if (cell.t >= 0 || G.basin <= 0) continue;
+    const amt = Math.min(G.basin, (1 - cell.w) * CELL_CAP, 8 * dt * (G.basin / BASIN.cap + 0.2));
+    G.basin -= amt; cell.w += amt / CELL_CAP;
+  }
+  // inom brädet, nerifrån och upp
+  const maxDown = 3 * dt, maxSide = 2 * dt;
+  for (let r = BOARD.rows - 1; r >= 0; r--) {
+    for (let c = 0; c < BOARD.cols; c++) {
+      const cell = G.board[r][c];
+      if (cell.t >= 0 || cell.w <= 0) continue;
+      if (r === BOARD.rows - 1) {
+        if (c >= MID_COL) { const amt = Math.min(cell.w, maxDown); cell.w -= amt; G.office += amt * CELL_CAP; }
+      } else {
+        const below = G.board[r + 1][c];
+        if (below.t < 0 && below.w < 1) { const amt = Math.min(cell.w, 1 - below.w, maxDown); cell.w -= amt; below.w += amt; }
+      }
+      // sidledes
+      for (const dc of [-1, 1]) {
+        const c2 = c + dc;
+        if (!inBoard(r, c2) || wallBetween(r, c, c2)) continue;
+        const n = G.board[r][c2];
+        if (n.t >= 0) continue;
+        const diff = cell.w - n.w;
+        if (diff > 0.01) { const amt = Math.min(diff / 2, maxSide); cell.w -= amt; n.w += amt; }
+      }
+    }
+  }
+  if (G.office >= S.goal && !G.over) { G.over = true; G.won = true; }
+  if (G.basin >= BASIN.cap && !G.over) { G.over = true; G.won = false; }
+}
+
+// --- Partiklar (mynt) ---
+function spawnCoin() {
+  const bill = Math.random() < 0.35;
+  G.particles.push({ x: 60 + Math.random() * 50, y: 135, vx: (Math.random() - 0.5) * 30, vy: 20 + Math.random() * 30, rot: Math.random() * 6, bill });
+}
+function surfaceY() { return BASIN.bottom - (BASIN.bottom - BASIN.top) * Math.min(1, G.basin / BASIN.cap); }
+function simParticles(dt) {
+  const sy = surfaceY();
+  for (const p of G.particles) {
+    p.vy += 400 * dt; p.y += p.vy * dt; p.x += p.vx * dt; p.rot += dt * 3;
+    if (p.y >= sy - 4 && !p.done) {
+      p.done = true; G.basin = Math.min(BASIN.cap, G.basin + (p.bill ? 3 : 2)); G.coins++; G.score += 1;
+      G.splashes.push({ x: p.x, y: sy, t: 0.4 });
+    }
+  }
+  G.particles = G.particles.filter(p => !p.done);
+  for (const s of G.splashes) s.t -= dt; G.splashes = G.splashes.filter(s => s.t > 0);
+  for (const f of G.flashes) f.t -= dt; G.flashes = G.flashes.filter(f => f.t > 0);
+}
+
+// --- Uppdatering ---
+let last = 0;
+function frame(ts) {
+  const dt = Math.min(0.05, (ts - last) / 1000 || 0); last = ts;
+  if (!G.over) {
+    G.t += dt;
+    G.coinTimer -= dt;
+    if (G.coinTimer <= 0) { spawnCoin(); G.coinTimer = G.coinInterval; }
+    if (S.ramp) G.coinInterval = S.coinInterval * Math.pow(0.9, Math.floor(G.t / 20));
+    simWater(dt);
+  }
+  simParticles(dt);
+  if (G.msgT > 0) G.msgT -= dt;
+  draw();
+  requestAnimationFrame(frame);
+}
+
+// --- Ritning ---
+function rr(x, y, w, h, r) { ctx.beginPath(); ctx.roundRect(x, y, w, h, r); }
+function rock(x, y, w, h, seed) {
+  ctx.fillStyle = '#3a3642'; ctx.fillRect(x, y, w, h);
+  ctx.fillStyle = '#2b2831';
+  let s = seed;
+  for (let i = 0; i < (w * h) / 900; i++) {
+    s = (s * 9301 + 49297) % 233280; const px = x + (s / 233280) * w;
+    s = (s * 9301 + 49297) % 233280; const py = y + (s / 233280) * h;
+    s = (s * 9301 + 49297) % 233280; const rad = 4 + (s / 233280) * 10;
+    ctx.beginPath(); ctx.ellipse(px, py, rad, rad * 0.6, 0, 0, Math.PI * 2); ctx.fill();
+  }
+}
+function water(x, y, w, h, alpha, t) {
+  if (h <= 0) return;
+  ctx.fillStyle = `rgba(40,140,220,${alpha})`; ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = 'rgba(220,245,255,.8)'; ctx.lineWidth = 2; ctx.beginPath();
+  for (let i = 0; i <= w; i += 6) { const yy = y + Math.sin((x + i) / 14 + t * 4) * 1.8; i === 0 ? ctx.moveTo(x + i, yy) : ctx.lineTo(x + i, yy); }
+  ctx.stroke();
+}
+
+function draw() {
+  const t = G.t;
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#15131a'; ctx.fillRect(0, 0, W, H);
+
+  // ---------- grottan ----------
+  rock(0, CAVE.top, W, BASIN.bottom + 20 - CAVE.top, 7);
+  // bassängens inre
+  ctx.fillStyle = '#1c2630'; ctx.fillRect(30, BASIN.top, 480, BASIN.bottom - BASIN.top);
+  // klockan
+  ctx.save(); ctx.translate(85, 95);
+  ctx.rotate(Math.sin(t * 5) * 0.08);
+  ctx.fillStyle = '#c99a2e'; ctx.fillRect(-3, -30, 6, 14);
+  ctx.fillStyle = '#f2c14e'; ctx.beginPath(); ctx.moveTo(-26, 22); ctx.quadraticCurveTo(-28, -18, 0, -18); ctx.quadraticCurveTo(28, -18, 26, 22); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#d9a83a'; ctx.fillRect(-30, 20, 60, 8);
+  ctx.fillStyle = '#8a6a1e'; ctx.beginPath(); ctx.arc(0, 32, 6, 0, Math.PI * 2); ctx.fill();
+  ctx.font = '22px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('📈', 0, 2);
+  ctx.restore();
+  ctx.fillStyle = '#f2c14e'; ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('VINSTKLOCKAN', 85, 140);
+
+  // vattnet i bassängen
+  const sy = surfaceY();
+  water(30, sy, 480, BASIN.bottom - sy, 0.75, t);
+  // vattnet fortsätter ner i vänstra halvans övre kant
+  if (G.basin > 0) { ctx.fillStyle = 'rgba(40,140,220,.75)'; ctx.fillRect(30, BASIN.bottom, 240, BOARD.y - BASIN.bottom); }
+
+  // arbetarens cell (på en avsats i grottan)
+  const cellX = 250, cellW = 190, cellTop = 160;
+  ctx.fillStyle = '#241f28'; ctx.fillRect(cellX, cellTop, cellW, BASIN.bottom - cellTop);
+  ctx.fillStyle = '#4a4552'; ctx.fillRect(cellX - 8, cellTop - 8, cellW + 16, 8);
+  // galler
+  ctx.strokeStyle = '#8c8793'; ctx.lineWidth = 4;
+  for (let i = 0; i < 6; i++) { ctx.beginPath(); ctx.moveTo(cellX + 6 + i * 11, cellTop); ctx.lineTo(cellX + 6 + i * 11, BASIN.bottom); ctx.stroke(); }
+  // stege
+  ctx.strokeStyle = '#a0763c'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(cellX - 30, 180); ctx.lineTo(cellX - 30, BASIN.bottom); ctx.moveTo(cellX - 16, 180); ctx.lineTo(cellX - 16, BASIN.bottom); ctx.stroke();
+  for (let y = 190; y < BASIN.bottom; y += 14) { ctx.beginPath(); ctx.moveTo(cellX - 30, y); ctx.lineTo(cellX - 16, y); ctx.stroke(); }
+  // arbetare
+  const panic = G.basin / BASIN.cap;
+  const arm = Math.sin(G.pumpPhase) * 0.6;
+  ctx.save(); ctx.translate(345, 250);
+  ctx.strokeStyle = '#e8dcc8'; ctx.lineWidth = 6; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(0, -20); ctx.lineTo(0, 20); ctx.stroke();                         // kropp
+  ctx.beginPath(); ctx.moveTo(0, 20); ctx.lineTo(-12, 48); ctx.moveTo(0, 20); ctx.lineTo(12, 48); ctx.stroke(); // ben
+  ctx.beginPath(); ctx.moveTo(0, -10); ctx.lineTo(28, -10 + arm * 25); ctx.stroke();             // arm mot pumpen
+  ctx.fillStyle = '#e8dcc8'; ctx.beginPath(); ctx.arc(0, -34, 13, 0, Math.PI * 2); ctx.fill();   // huvud
+  ctx.fillStyle = '#6b4f2a'; ctx.fillRect(-14, -48, 28, 8);                                       // keps
+  ctx.fillStyle = '#222'; ctx.font = '12px sans-serif'; ctx.textAlign = 'center'; ctx.fillText(panic > 0.6 ? '😰' : '😓', 0, -32);
+  // pump
+  ctx.strokeStyle = '#d2338f'; ctx.lineWidth = 7;
+  ctx.beginPath(); ctx.moveTo(28, -10 + arm * 25); ctx.lineTo(62, -22 + arm * 10); ctx.stroke();
+  ctx.fillStyle = '#d2338f'; rr(58, -16, 14, 60, 5); ctx.fill();
+  ctx.restore();
+  // rör från pumpen till höger kant
+  ctx.strokeStyle = '#9a98a3'; ctx.lineWidth = 12; ctx.lineCap = 'butt';
+  ctx.beginPath(); ctx.moveTo(410, 240); ctx.lineTo(410, 190); ctx.lineTo(530, 190); ctx.lineTo(530, 215); ctx.stroke();
+  ctx.strokeStyle = '#c4c2cc'; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.moveTo(410, 240); ctx.lineTo(410, 190); ctx.lineTo(530, 190); ctx.stroke();
+  // vattnet som forsar ut ur spelet
+  if (G.basin > 0 && S.pumpRate > 0) {
+    ctx.strokeStyle = 'rgba(120,200,255,.85)'; ctx.lineWidth = 6 + Math.sin(t * 20) * 2;
+    ctx.beginPath(); ctx.moveTo(530, 215);
+    for (let y = 215; y < H - BAR.h; y += 12) ctx.lineTo(530 + Math.sin(y / 9 + t * 25) * 4 + (y - 215) * 0.02, y);
+    ctx.stroke();
+  }
+  // golvet över högra halvan av bassängen (sten) och under arbetaren
+  rock(250, BASIN.bottom, 290, BOARD.y - BASIN.bottom, 3);
+  rock(0, BASIN.bottom, 30, BOARD.y - BASIN.bottom, 5);
+  rock(0, 0, 30, H - BAR.h, 11); // vänster kant
+  // mynt
+  for (const p of G.particles) {
+    ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.rot);
+    if (p.bill) { ctx.fillStyle = '#7bd67b'; ctx.fillRect(-9, -5, 18, 10); ctx.fillStyle = '#2f7d32'; ctx.fillRect(-3, -3, 6, 6); }
+    else { ctx.fillStyle = '#f5c842'; ctx.beginPath(); ctx.arc(0, 0, 6, 0, Math.PI * 2); ctx.fill(); ctx.fillStyle = '#c99a2e'; ctx.beginPath(); ctx.arc(0, 0, 3, 0, Math.PI * 2); ctx.fill(); }
+    ctx.restore();
+  }
+  for (const s of G.splashes) { ctx.strokeStyle = `rgba(220,245,255,${s.t * 2})`; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(s.x, s.y, (0.4 - s.t) * 40, Math.PI, 0); ctx.stroke(); }
+
+  // ---------- spelplanen ----------
+  ctx.fillStyle = '#1f2a33'; ctx.fillRect(BOARD.x, BOARD.y, BOARD.w, BOARD.h);
+  for (let r = 0; r < BOARD.rows; r++) for (let c = 0; c < BOARD.cols; c++) {
+    const x = BOARD.x + c * BOARD.cell, y = BOARD.y + r * BOARD.cell, cell = G.board[r][c];
+    if (cell.t < 0) {
+      ctx.fillStyle = '#121a21'; ctx.fillRect(x, y, BOARD.cell, BOARD.cell);
+      if (cell.w > 0.005) { const h = cell.w * BOARD.cell; ctx.fillStyle = 'rgba(40,140,220,.75)'; ctx.fillRect(x, y + BOARD.cell - h, BOARD.cell, h); }
+      continue;
+    }
+    const locked = isLocked(r, c);
+    const selected = G.sel && G.sel[0] === r && G.sel[1] === c;
+    ctx.save();
+    ctx.fillStyle = locked ? '#55535c' : COLORS[cell.t];
+    rr(x + 3, y + 3, BOARD.cell - 6, BOARD.cell - 6, 10); ctx.fill();
+    if (selected) { ctx.strokeStyle = '#ffeb3b'; ctx.lineWidth = 4; ctx.stroke(); }
+    if (locked) { ctx.filter = 'grayscale(1)'; ctx.globalAlpha = 0.5; }
+    ctx.font = '36px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#000'; ctx.fillText(ANIMALS[cell.t], x + BOARD.cell / 2, y + BOARD.cell / 2 + 2);
+    ctx.restore();
+  }
+  for (const f of G.flashes) { ctx.fillStyle = `rgba(255,255,200,${f.t * 2})`; ctx.fillRect(BOARD.x + f.c * BOARD.cell, BOARD.y + f.r * BOARD.cell, BOARD.cell, BOARD.cell); }
+  if (!G.rightUnlocked) {
+    ctx.fillStyle = 'rgba(0,0,0,.35)'; ctx.fillRect(BOARD.x + MID_COL * BOARD.cell, BOARD.y, BOARD.w / 2, BOARD.h);
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 18px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText('🔒 ' + leftSolvedPct().toFixed(0) + ' / ' + S.leftPct + ' %', BOARD.x + MID_COL * BOARD.cell + BOARD.w / 4, BOARD.y + BOARD.h / 2);
+  }
+  // rutnät
+  ctx.strokeStyle = 'rgba(255,255,255,.06)'; ctx.lineWidth = 1;
+  for (let i = 0; i <= BOARD.cols; i++) { ctx.beginPath(); ctx.moveTo(BOARD.x + i * BOARD.cell, BOARD.y); ctx.lineTo(BOARD.x + i * BOARD.cell, BOARD.y + BOARD.h); ctx.stroke(); }
+  for (let i = 0; i <= BOARD.rows; i++) { ctx.beginPath(); ctx.moveTo(BOARD.x, BOARD.y + i * BOARD.cell); ctx.lineTo(BOARD.x + BOARD.w, BOARD.y + i * BOARD.cell); ctx.stroke(); }
+  // halvväggen
+  const wx = BOARD.x + MID_COL * BOARD.cell;
+  rock(wx - 5, BOARD.y + WALL_ROW * BOARD.cell, 10, BOARD.h / 2 + 12, 17);
+  // golv/tak över kontorets vänstra halva
+  rock(BOARD.x - 30, BOARD.y + BOARD.h, MID_COL * BOARD.cell + 30, OFFICE.y - (BOARD.y + BOARD.h), 23);
+  // högra sidan: kanten
+  rock(BOARD.x + BOARD.w, BOARD.y, 30, BOARD.h, 29);
+
+  // ---------- kontoret ----------
+  ctx.fillStyle = '#5a1f28'; ctx.fillRect(BOARD.x, OFFICE.y, BOARD.w, OFFICE.h);            // tapet
+  ctx.fillStyle = '#7a2f3a'; for (let i = 0; i < 480; i += 40) ctx.fillRect(BOARD.x + i, OFFICE.y, 20, OFFICE.h);
+  ctx.fillStyle = '#3b2616'; ctx.fillRect(BOARD.x, OFFICE.y + OFFICE.h - 16, BOARD.w, 16);   // golv
+  // fönster med stad
+  ctx.fillStyle = '#243a5e'; rr(400, OFFICE.y + 14, 80, 60, 8); ctx.fill();
+  ctx.fillStyle = '#152238'; for (let i = 0; i < 5; i++) ctx.fillRect(406 + i * 15, OFFICE.y + 40 + (i % 2) * 10, 10, 34 - (i % 2) * 10);
+  // tavla
+  ctx.fillStyle = '#d9b76a'; rr(50, OFFICE.y + 12, 70, 44, 4); ctx.fill(); ctx.fillStyle = '#fff'; ctx.fillRect(54, OFFICE.y + 16, 62, 36);
+  ctx.strokeStyle = '#2e9d4a'; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(58, OFFICE.y + 46); ctx.lineTo(75, OFFICE.y + 36); ctx.lineTo(90, OFFICE.y + 40); ctx.lineTo(112, OFFICE.y + 20); ctx.stroke();
+  // skrivbord
+  ctx.fillStyle = '#4e2f16'; rr(60, OFFICE.y + 84, 190, 14, 4); ctx.fill(); ctx.fillRect(70, OFFICE.y + 98, 14, 26); ctx.fillRect(236, OFFICE.y + 98, 14, 26);
+  // myntstaplar
+  for (let i = 0; i < 5; i++) for (let j = 0; j < 3 + (i % 3); j++) {
+    ctx.fillStyle = j % 2 ? '#f5c842' : '#e0b030'; rr(280 + i * 34, OFFICE.y + OFFICE.h - 24 - j * 7, 28, 7, 3); ctx.fill();
+  }
+  for (let i = 0; i < 3; i++) for (let j = 0; j < 2 + i; j++) { ctx.fillStyle = j % 2 ? '#f5c842' : '#e0b030'; rr(100 + i * 32, OFFICE.y + 74 - j * 7, 26, 7, 3); ctx.fill(); }
+  // Krösus
+  const wet = G.office / S.goal;
+  ctx.save(); ctx.translate(160, OFFICE.y + 60);
+  ctx.fillStyle = '#8b1e2d'; ctx.beginPath(); ctx.ellipse(0, 40, 46, 34, 0, Math.PI, 0); ctx.fill();   // stol
+  ctx.fillStyle = '#1f1f2e'; ctx.beginPath(); ctx.ellipse(0, 20, 34, 30, 0, 0, Math.PI * 2); ctx.fill(); // kostym/mage
+  ctx.fillStyle = '#c9202b'; ctx.fillRect(-6, -6, 12, 30);                                            // slips
+  ctx.fillStyle = '#f1c9a5'; ctx.beginPath(); ctx.arc(0, -18, 20, 0, Math.PI * 2); ctx.fill();        // huvud
+  ctx.fillStyle = '#111'; ctx.fillRect(-16, -44, 32, 10); ctx.fillRect(-11, -62, 22, 20);            // hatt
+  ctx.strokeStyle = '#111'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(8, -20, 6, 0, Math.PI * 2); ctx.stroke(); // monokel
+  ctx.fillStyle = '#333'; ctx.fillRect(-12, -9, 24, 4);                                               // mustasch
+  ctx.font = '14px sans-serif'; ctx.textAlign = 'center'; ctx.fillStyle = '#000';
+  ctx.fillText(wet > 0.6 ? '😱' : wet > 0.25 ? '😠' : '😏', 0, -16);
+  ctx.fillStyle = '#f5c842'; ctx.font = 'bold 11px sans-serif'; ctx.fillText('KRÖSUS', 0, 62);
+  ctx.restore();
+  // vatten som forsar ner från högra halvan
+  for (let c = MID_COL; c < BOARD.cols; c++) {
+    const cell = G.board[BOARD.rows - 1][c];
+    if (cell.t < 0 && cell.w > 0.02) {
+      ctx.fillStyle = `rgba(60,160,240,${Math.min(0.8, cell.w)})`;
+      const x = BOARD.x + c * BOARD.cell + 20; ctx.fillRect(x, BOARD.y + BOARD.h, 20, OFFICE.y + OFFICE.h - (BOARD.y + BOARD.h));
+    }
+  }
+  // kontorets vattennivå
+  const oh = OFFICE.h * Math.min(1, G.office / S.goal);
+  water(BOARD.x, OFFICE.y + OFFICE.h - oh, BOARD.w, oh, 0.55, t);
+  rock(0, OFFICE.y, 30, OFFICE.h, 31); rock(BOARD.x + BOARD.w, OFFICE.y, 30, OFFICE.h, 37);
+
+  // ---------- HUD ----------
+  ctx.fillStyle = '#1e1b24'; ctx.fillRect(0, 0, W, CAVE.top);
+  ctx.textBaseline = 'middle'; ctx.textAlign = 'left'; ctx.fillStyle = '#f5e9c8'; ctx.font = 'bold 20px sans-serif';
+  ctx.fillText('ZooDoom', 14, 22);
+  ctx.font = '14px sans-serif'; ctx.fillStyle = '#ddd';
+  ctx.fillText('Poäng ' + G.score + '   Mynt ' + G.coins + '   Tid ' + G.t.toFixed(0) + ' s', 14, 44);
+  // bassängnivå
+  ctx.textAlign = 'right'; ctx.fillText('Bassäng', 526, 14);
+  ctx.fillStyle = '#333'; rr(386, 22, 140, 10, 5); ctx.fill();
+  ctx.fillStyle = panic > 0.75 ? '#e53935' : '#42a5f5'; rr(386, 22, 140 * Math.min(1, panic), 10, 5); ctx.fill();
+  ctx.fillStyle = '#ddd'; ctx.fillText('Kontoret ' + G.office.toFixed(0) + ' / ' + S.goal + ' l', 526, 46);
+
+  // ---------- verktygsrad ----------
+  ctx.fillStyle = '#1e1b24'; ctx.fillRect(0, BAR.y, W, BAR.h);
+  const tools = [['hammer', '🔨', G.power.hammer], ['bomb', '💣', G.power.bomb], ['shuffle', '🔀', G.power.shuffle]];
+  tools.forEach(([k, ic, n], i) => {
+    const x = 30 + i * 110;
+    ctx.fillStyle = G.tool === k ? '#f0b429' : (n > 0 ? '#3a3642' : '#26232c');
+    rr(x, BAR.y + 8, 96, 44, 10); ctx.fill();
+    ctx.font = '26px sans-serif'; ctx.textAlign = 'center'; ctx.fillStyle = '#000'; ctx.globalAlpha = n > 0 ? 1 : 0.35;
+    ctx.fillText(ic, x + 34, BAR.y + 31); ctx.globalAlpha = 1;
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 16px sans-serif'; ctx.fillText('×' + n, x + 72, BAR.y + 31);
+  });
+  ctx.fillStyle = '#3a3642'; rr(430, BAR.y + 8, 96, 44, 10); ctx.fill();
+  ctx.font = '26px sans-serif'; ctx.fillStyle = '#000'; ctx.fillText('⚙️', 478, BAR.y + 31);
+
+  // meddelande
+  if (G.msgT > 0 && G.msg) {
+    ctx.font = 'bold 16px sans-serif'; ctx.textAlign = 'center';
+    const tw = ctx.measureText(G.msg).width + 24;
+    ctx.fillStyle = 'rgba(0,0,0,.75)'; rr(W / 2 - tw / 2, BOARD.y - 40 + 6, tw, 30, 8); ctx.fill();
+    ctx.fillStyle = '#ffeb3b'; ctx.fillText(G.msg, W / 2, BOARD.y - 40 + 21);
+  }
+  // slut
+  if (G.over) {
+    ctx.fillStyle = 'rgba(0,0,0,.72)'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.font = 'bold 34px sans-serif';
+    ctx.fillText(G.won ? 'Kontoret översvämmat!' : 'Arbetaren drunknade', W / 2, H / 2 - 50);
+    ctx.font = '18px sans-serif';
+    ctx.fillText(G.won ? 'Krösus fick sig ett bad. Poäng: ' + G.score : 'Bassängen blev full. Poäng: ' + G.score, W / 2, H / 2);
+    ctx.fillStyle = '#f0b429'; rr(W / 2 - 90, H / 2 + 40, 180, 50, 12); ctx.fill();
+    ctx.fillStyle = '#000'; ctx.font = 'bold 20px sans-serif'; ctx.fillText('Spela igen', W / 2, H / 2 + 66);
+  }
+}
+
+// --- Input ---
+let scale = 1, offX = 0, offY = 0;
+function resize() {
+  const wrap = document.getElementById('wrap');
+  const aw = wrap.clientWidth, ah = wrap.clientHeight;
+  scale = Math.min(aw / W, ah / H);
+  canvas.width = Math.round(W * scale * devicePixelRatio); canvas.height = Math.round(H * scale * devicePixelRatio);
+  canvas.style.width = Math.round(W * scale) + 'px'; canvas.style.height = Math.round(H * scale) + 'px';
+  ctx.setTransform(scale * devicePixelRatio, 0, 0, scale * devicePixelRatio, 0, 0);
+}
+addEventListener('resize', resize);
+function pos(e) { const b = canvas.getBoundingClientRect(); return { x: (e.clientX - b.left) / scale, y: (e.clientY - b.top) / scale }; }
+function cellAt(p) {
+  const c = Math.floor((p.x - BOARD.x) / BOARD.cell), r = Math.floor((p.y - BOARD.y) / BOARD.cell);
+  return inBoard(r, c) ? [r, c] : null;
+}
+canvas.addEventListener('pointerdown', e => {
+  const p = pos(e);
+  if (G.over) { if (Math.abs(p.x - W / 2) < 90 && p.y > H / 2 + 40 && p.y < H / 2 + 90) newGame(); return; }
+  if (p.y >= BAR.y) {
+    if (p.x >= 430) { openSettings(); return; }
+    const i = Math.floor((p.x - 30) / 110); const k = ['hammer', 'bomb', 'shuffle'][i];
+    if (!k || G.power[k] <= 0) return;
+    if (k === 'shuffle') { G.power.shuffle--; shuffleTiles(); say('Blandat', 1); return; }
+    G.tool = G.tool === k ? null : k; G.sel = null;
+    say(G.tool ? (k === 'hammer' ? 'Tryck på en bricka att krossa' : 'Tryck där bomben ska smälla') : '', 2);
+    return;
+  }
+  const cell = cellAt(p);
+  if (!cell) { G.sel = null; return; }
+  if (G.tool) { useTool(cell[0], cell[1]); return; }
+  if (G.sel && Math.abs(G.sel[0] - cell[0]) + Math.abs(G.sel[1] - cell[1]) === 1) { tryMove(G.sel[0], G.sel[1], cell[0], cell[1]); G.sel = null; G.drag = null; return; }
+  G.sel = cell; G.drag = { r: cell[0], c: cell[1], x: p.x, y: p.y };
+});
+canvas.addEventListener('pointermove', e => {
+  if (!G.drag) return;
+  const p = pos(e), dx = p.x - G.drag.x, dy = p.y - G.drag.y;
+  if (Math.hypot(dx, dy) < 22) return;
+  const d = Math.abs(dx) > Math.abs(dy) ? [0, Math.sign(dx)] : [Math.sign(dy), 0];
+  tryMove(G.drag.r, G.drag.c, G.drag.r + d[0], G.drag.c + d[1]);
+  G.sel = null; G.drag = null;
+});
+canvas.addEventListener('pointerup', () => { G.drag = null; });
+
+// --- Inställningar ---
+const $ = id => document.getElementById(id);
+function openSettings() {
+  $('s_left').value = S.leftPct; $('s_coin').value = S.coinInterval; $('s_pump').value = S.pumpRate; $('s_goal').value = S.goal;
+  $('s_ramp').checked = S.ramp; $('s_slide').checked = S.slide; showVals();
+  $('settings').style.display = 'flex';
+}
+function showVals() { $('v_left').textContent = $('s_left').value + ' %'; $('v_coin').textContent = $('s_coin').value + ' s'; $('v_pump').textContent = $('s_pump').value; $('v_goal').textContent = $('s_goal').value; }
+['s_left', 's_coin', 's_pump', 's_goal'].forEach(id => $(id).addEventListener('input', showVals));
+$('b_close').onclick = () => $('settings').style.display = 'none';
+$('b_reset').onclick = () => { S = Object.assign({}, DEFAULTS); saveSettings(); openSettings(); };
+$('b_save').onclick = () => {
+  S = { leftPct: +$('s_left').value, coinInterval: +$('s_coin').value, pumpRate: +$('s_pump').value, goal: +$('s_goal').value, ramp: $('s_ramp').checked, slide: $('s_slide').checked };
+  saveSettings(); $('settings').style.display = 'none'; newGame();
+};
+
+resize(); newGame(); requestAnimationFrame(frame);
+</script>
+</body>
+</html>
