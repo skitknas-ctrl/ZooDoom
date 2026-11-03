@@ -29,9 +29,17 @@ och den enda vägen undan är genom brädet du spelar på.
 
 ## Teknik
 
-Under uppbyggnad. Målet är en Android-app (F-Droid-vänlig, utan spårning eller
-annonser) som utvecklas helt via GitHub. Valet mellan ren Android-kod och ett
-HTML5/Canvas-spel i WebView avgörs i ett första steg.
+Spelet är skrivet i HTML5/Canvas (`index.html`, inga beroenden) och körs antingen
+direkt i webbläsaren eller inuti en tunn Android-app (WebView) som byggs av
+GitHub Actions. Inga annonser, ingen spårning, ingen nätverksåtkomst.
+
+- Webbversion: aktivera GitHub Pages för grenen `main` → `https://skitknas-ctrl.github.io/zoodoom/`
+- Android: GitHub Actions bygger en test-APK vid varje push till `main` och publicerar
+  den som utgåvan `0.1.0-test.<byggnummer>`. Senaste bygget finns alltid här:
+
+      https://github.com/skitknas-ctrl/ZooDoom/releases/latest/download/zoodoom-debug.apk
+
+  Med Obtainium: lägg till `https://github.com/skitknas-ctrl/ZooDoom`, inga extra inställningar behövs.
 
 ## Licens
 
