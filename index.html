@@ -69,7 +69,7 @@ if (!ctx.roundRect) ctx.roundRect = function (x, y, w, h, r) {
   this.lineTo(x, y + r); this.quadraticCurveTo(x, y, x + r, y); this.closePath();
 };
 
-const DEFAULTS = { leftPct: 40, coinInterval: 0.9, pumpRate: 1.5, goal: 120, ramp: true, slide: true };
+const DEFAULTS = { leftPct: 40, coinInterval: 0.6, pumpRate: 1.0, goal: 120, ramp: true, slide: true };
 let S = loadSettings();
 function loadSettings() {
   try { const j = JSON.parse(localStorage.getItem('zoodoom.settings') || 'null'); if (j) return Object.assign({}, DEFAULTS, j); } catch (e) {}
@@ -88,8 +88,17 @@ const OFFICE = { y: 812, h: 128 };                                          // 8
 const BAR = { y: 940, h: 60 };
 const CELL_CAP = 5;                                                         // liter per tomrum på brädet
 
-const ANIMALS = ['🐼', '🦁', '🐘', '🐰', '🐧', '🐸'];
-const COLORS = ['#e8f3ff', '#ffd97a', '#9ad1ff', '#ffc4e1', '#cfd8ff', '#b8f2a8'];
+// Sex sorters stenblock (bas, ljus kant, mörk kant)
+const STONES = [
+  ['#c84b4b', '#e98a8a', '#7e2a2a'],   // röd
+  ['#3f7fd1', '#86b4f0', '#24508a'],   // blå
+  ['#4caf50', '#8fdc92', '#2c6b2f'],   // grön
+  ['#e3b23c', '#f6d98a', '#946f1a'],   // gul
+  ['#9b59b6', '#c99be0', '#5e3470'],   // lila
+  ['#e07a2f', '#f4b27f', '#8c4a17']    // orange
+];
+const NTYPES = STONES.length;
+const LOCKED_STONE = ['#5a5861', '#7b7984', '#3a3940'];
 
 // --- Speltillstånd ---
 let G;
@@ -104,7 +113,7 @@ function newGame() {
     G.board[r] = [];
     for (let c = 0; c < BOARD.cols; c++) {
       let t;
-      do { t = (Math.random() * ANIMALS.length) | 0; }
+      do { t = (Math.random() * NTYPES) | 0; }
       while ((c >= 2 && G.board[r][c - 1].t === t && G.board[r][c - 2].t === t) ||
              (r >= 2 && G.board[r - 1][c].t === t && G.board[r - 2][c].t === t));
       G.board[r][c] = { t, w: 0 };           // t = -1 betyder tomrum; w = liter/CELL_CAP (0..1)
@@ -321,6 +330,23 @@ function water(x, y, w, h, alpha, t) {
   ctx.stroke();
 }
 
+function drawStone(x, y, col, selected, seed) {
+  const m = 3, s = BOARD.cell - 2 * m, b = 6;
+  ctx.fillStyle = col[2]; rr(x + m, y + m, s, s, 7); ctx.fill();                    // mörk kant (nedre/höger)
+  ctx.fillStyle = col[1]; rr(x + m, y + m, s - b, s - b, 7); ctx.fill();            // ljus kant (övre/vänster)
+  ctx.fillStyle = col[0]; rr(x + m + b / 2, y + m + b / 2, s - b, s - b, 5); ctx.fill(); // blockets yta
+  // sprickor/skrovlighet
+  ctx.strokeStyle = col[2]; ctx.lineWidth = 1.5; ctx.globalAlpha = 0.55;
+  const k = seed % 4;
+  ctx.beginPath();
+  if (k === 0) { ctx.moveTo(x + 14, y + 40); ctx.lineTo(x + 24, y + 30); ctx.lineTo(x + 30, y + 34); }
+  else if (k === 1) { ctx.moveTo(x + 38, y + 16); ctx.lineTo(x + 32, y + 26); ctx.lineTo(x + 40, y + 36); }
+  else if (k === 2) { ctx.moveTo(x + 16, y + 18); ctx.lineTo(x + 26, y + 22); ctx.moveTo(x + 36, y + 42); ctx.lineTo(x + 44, y + 38); }
+  else { ctx.moveTo(x + 20, y + 44); ctx.lineTo(x + 30, y + 40); ctx.lineTo(x + 34, y + 46); }
+  ctx.stroke(); ctx.globalAlpha = 1;
+  if (selected) { ctx.strokeStyle = '#ffeb3b'; ctx.lineWidth = 4; rr(x + m, y + m, s, s, 7); ctx.stroke(); }
+}
+
 function draw() {
   const t = G.t;
   ctx.clearRect(0, 0, W, H);
@@ -341,17 +367,10 @@ function draw() {
   ctx.restore();
   ctx.fillStyle = '#f2c14e'; ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('VINSTKLOCKAN', 85, 140);
 
-  // vattnet i bassängen
-  const sy = surfaceY();
-  water(30, sy, 480, BASIN.bottom - sy, 0.75, t);
-  // vattnet fortsätter ner i vänstra halvans övre kant
-  if (G.basin > 0) { ctx.fillStyle = 'rgba(40,140,220,.75)'; ctx.fillRect(30, BASIN.bottom, 240, BOARD.y - BASIN.bottom); }
-
   // arbetarens cell (på en avsats i grottan)
-  const cellX = 250, cellW = 190, cellTop = 160;
+  const cellX = 250, cellW = 190, cellTop = BASIN.top;
   ctx.fillStyle = '#241f28'; ctx.fillRect(cellX, cellTop, cellW, BASIN.bottom - cellTop);
-  ctx.fillStyle = '#4a4552'; ctx.fillRect(cellX - 8, cellTop - 8, cellW + 16, 8);
-  // galler
+    // galler
   ctx.strokeStyle = '#8c8793'; ctx.lineWidth = 4;
   for (let i = 0; i < 6; i++) { ctx.beginPath(); ctx.moveTo(cellX + 6 + i * 11, cellTop); ctx.lineTo(cellX + 6 + i * 11, BASIN.bottom); ctx.stroke(); }
   // stege
@@ -379,6 +398,10 @@ function draw() {
   ctx.beginPath(); ctx.moveTo(410, 240); ctx.lineTo(410, 190); ctx.lineTo(530, 190); ctx.lineTo(530, 215); ctx.stroke();
   ctx.strokeStyle = '#c4c2cc'; ctx.lineWidth = 4;
   ctx.beginPath(); ctx.moveTo(410, 240); ctx.lineTo(410, 190); ctx.lineTo(530, 190); ctx.stroke();
+  // vattnet i bassängen – ritas efter cellen och arbetaren så att han står i vattnet
+  const sy = surfaceY();
+  water(30, sy, 480, BASIN.bottom - sy, 0.62, t);
+  if (G.basin > 0) { ctx.fillStyle = 'rgba(40,140,220,.62)'; ctx.fillRect(30, BASIN.bottom, 240, BOARD.y - BASIN.bottom); }
   // vattnet som forsar ut ur spelet
   if (G.basin > 0 && S.pumpRate > 0) {
     ctx.strokeStyle = 'rgba(120,200,255,.85)'; ctx.lineWidth = 6 + Math.sin(t * 20) * 2;
@@ -410,14 +433,7 @@ function draw() {
     }
     const locked = isLocked(r, c);
     const selected = G.sel && G.sel[0] === r && G.sel[1] === c;
-    ctx.save();
-    ctx.fillStyle = locked ? '#55535c' : COLORS[cell.t];
-    rr(x + 3, y + 3, BOARD.cell - 6, BOARD.cell - 6, 10); ctx.fill();
-    if (selected) { ctx.strokeStyle = '#ffeb3b'; ctx.lineWidth = 4; ctx.stroke(); }
-    if (locked) { ctx.filter = 'grayscale(1)'; ctx.globalAlpha = 0.5; }
-    ctx.font = '36px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillStyle = '#000'; ctx.fillText(ANIMALS[cell.t], x + BOARD.cell / 2, y + BOARD.cell / 2 + 2);
-    ctx.restore();
+    drawStone(x, y, locked ? LOCKED_STONE : STONES[cell.t], selected, r * 31 + c * 17);
   }
   for (const f of G.flashes) { ctx.fillStyle = `rgba(255,255,200,${f.t * 2})`; ctx.fillRect(BOARD.x + f.c * BOARD.cell, BOARD.y + f.r * BOARD.cell, BOARD.cell, BOARD.cell); }
   if (!G.rightUnlocked) {
