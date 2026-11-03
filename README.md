@@ -6,26 +6,30 @@ och den enda vägen undan är genom brädet du spelar på.
 
 ## Spelidé
 
-- Högst upp står en kung, riddare eller prinsessa i en kammare. Sten (eller vatten,
-  lava, sand …) väller in och kommer att krossa/dränka figuren om flödet inte får
-  rinna undan.
-- Under kammaren ligger ett Zookeeper-liknande bräde fullt av djurbrickor.
-- Spelaren byter plats på två intilliggande brickor för att skapa rader om tre eller
-  fler likadana djur. Matchade brickor försvinner och lämnar tomrum.
-- Tomrummen bildar kanaler. Flödet söker sig nedåt/sidledes genom varje öppning det
-  hittar – precis som fallande sand – och rinner ut i botten.
-- Banan är klarad när tillräckligt mycket av flödet runnit undan utan att nå figuren.
-  Misslyckas spelaren fylls kammaren och figuren går under.
+- Högst upp hänger en vinstklocka (som på börsen). Den ringer och pengar – mynt och
+  sedlar – regnar ner i en vattenbassäng.
+- I en grotta ovanför bassängen står en inburad arbetare och pumpar vatten ur sin
+  fängelsehåla; vattnet forsar ut genom ett rör i sidan av spelet.
+- Mynten samlas på hög på bassängens botten och trycker upp vattennivån. När vattnet
+  når arbetarens haka släpper han pumpen och trampar vatten; når det cellens tak
+  drunknar han och spelet är förlorat.
+- Under bassängen ligger en Zookeeper-liknande spelplan (10×8) med färgade stenblock.
+  Bassängens golv täcker vänstra halvan, så vattnet kommer bara in via högra halvans
+  överkant. Under högra halvan finns ett golv och en halvvägg går upp till mitten,
+  så vattnet måste fylla högra halvan, rinna över väggen och ut genom vänstra halvans
+  botten.
+- Spelaren byter plats på två intilliggande block för att få tre eller fler i rad.
+  Matchade block försvinner för gott och tomrummen blir kanaler för vattnet.
+- Vänstra halvan är låst (grå) tills högra halvan är rensad till en inställbar
+  procent.
+- Under spelplanen ligger ett lyxigt kontor där Krösus sitter vid sitt skrivbord
+  med myntstaplar. Banan är vunnen när tillräckligt många liter runnit ner i kontoret.
 
-## Spelmekanik (planerad)
+## Hjälpmedel och inställningar
 
-- Fysik för flödet: enkel cellautomat ("falling sand") som uppdateras varje tick.
-- Brädet: rutnät (t.ex. 8×8) med 6–7 djursorter, kaskadfall efter varje match.
-- Hinder: stenblock, låsta brickor och is som kräver flera matchningar.
-- Hjälpmedel: bomb, radsprängare och "dränering" som öppnar en hel kolumn.
-- Svårighetsgrad: hur snabbt flödet rinner, hur många drag/sekunder spelaren har och
-  hur långt det är från kammaren till utloppet.
-- Banor: slumpgenererade utifrån regler, med stigande svårighet.
+- Hammare (tar bort ett block), bomb (3×3) och blanda om.
+- Kugghjulet: procentkrav för upplåsning, myntregnets takt, inläckage, pumpens
+  kapacitet, mål i liter, stigande svårighet och om block får skjutas in i tomrum.
 
 ## Teknik
 

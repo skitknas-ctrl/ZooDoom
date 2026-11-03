@@ -27,18 +27,24 @@
 <div id="settings">
   <div class="box">
     <h2>Inställningar</h2>
-    <label class="row"><span>Vänster halva måste vara löst till</span><b id="v_left"></b></label>
-    <input type="range" id="s_left" min="0" max="100" step="5">
-    <div class="hint">Procent av vänstra halvans rutor som måste vara rensade innan högra halvan låses upp.</div>
+    <label class="row"><span>Högra halvan måste vara löst till</span><b id="v_first"></b></label>
+    <input type="range" id="s_first" min="0" max="100" step="5">
+    <div class="hint">Procent av högra halvans rutor som måste vara rensade innan vänstra halvan låses upp.</div>
 
-    <label class="row"><span>Sekunder mellan mynt</span><b id="v_coin"></b></label>
+    <label class="row"><span>Sekunder mellan myntskurar</span><b id="v_coin"></b></label>
     <input type="range" id="s_coin" min="0.2" max="3" step="0.1">
+    <label class="row"><span>Mynt per skur</span><b id="v_coins"></b></label>
+    <input type="range" id="s_coins" min="1" max="6" step="1">
+    <div class="hint">Mynten samlas på hög på bassängens botten och höjer vattennivån.</div>
 
+    <label class="row"><span>Vatten som läcker in (liter/s)</span><b id="v_leak"></b></label>
+    <input type="range" id="s_leak" min="0" max="8" step="0.25">
     <label class="row"><span>Pumpens kapacitet (liter/s)</span><b id="v_pump"></b></label>
     <input type="range" id="s_pump" min="0" max="6" step="0.25">
+    <div class="hint">Pumpen går bara så länge arbetaren når den – när vattnet når hakan trampar han vatten i stället.</div>
 
     <label class="row"><span>Mål: liter i kontoret</span><b id="v_goal"></b></label>
-    <input type="range" id="s_goal" min="40" max="400" step="10">
+    <input type="range" id="s_goal" min="20" max="400" step="10">
 
     <label class="row"><span>Svårigheten ökar var 20:e sekund</span><input type="checkbox" id="s_ramp"></label>
     <label class="row"><span>Bricka får skjutas in i tomrum</span><input type="checkbox" id="s_slide"></label>
@@ -69,24 +75,30 @@ if (!ctx.roundRect) ctx.roundRect = function (x, y, w, h, r) {
   this.lineTo(x, y + r); this.quadraticCurveTo(x, y, x + r, y); this.closePath();
 };
 
-const DEFAULTS = { leftPct: 40, coinInterval: 0.6, pumpRate: 1.0, goal: 120, ramp: true, slide: true };
+const DEFAULTS = { firstPct: 40, coinInterval: 0.7, coinsPerDrop: 2, leakRate: 2.5, pumpRate: 1.5, goal: 60, ramp: true, slide: true };
+const SETTINGS_KEY = 'zoodoom.settings.v2';
 let S = loadSettings();
 function loadSettings() {
-  try { const j = JSON.parse(localStorage.getItem('zoodoom.settings') || 'null'); if (j) return Object.assign({}, DEFAULTS, j); } catch (e) {}
+  try { const j = JSON.parse(localStorage.getItem(SETTINGS_KEY) || 'null'); if (j) return Object.assign({}, DEFAULTS, j); } catch (e) {}
   return Object.assign({}, DEFAULTS);
 }
-function saveSettings() { try { localStorage.setItem('zoodoom.settings', JSON.stringify(S)); } catch (e) {} }
+function saveSettings() { try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(S)); } catch (e) {} }
 
 // --- Geometri (logiska pixlar) ---
-const BOARD = { x: 30, y: 320, cols: 8, rows: 8, cell: 60 };
-BOARD.w = BOARD.cols * BOARD.cell; BOARD.h = BOARD.rows * BOARD.cell;      // 480 x 480
-const MID_COL = BOARD.cols / 2;                                             // halvvägg mellan kol 3 och 4
+const HUD_H = 56;
+const BOARD = { x: 30, y: 434, cols: 10, rows: 8, cell: 48 };
+BOARD.w = BOARD.cols * BOARD.cell; BOARD.h = BOARD.rows * BOARD.cell;      // 480 x 384 -> 434..818
+const MID_COL = BOARD.cols / 2;                                             // halvvägg mellan kol 4 och 5
 const WALL_ROW = BOARD.rows / 2;                                            // väggen går från golvet upp till mitten
-const CAVE = { top: 60, floorY: 300 };                                      // bassängens vatten mellan 150 och 300
-const BASIN = { top: 150, bottom: 300, cap: 100 };                          // liter
-const OFFICE = { y: 812, h: 128 };                                          // 812..940
+const INNER = { x: 30, w: 480 };
+const CAVE = { ceiling: 80 };                                               // berg 56..80, grottan börjar vid 80
+const CELL = { x: 200, w: 240, top: 120, floor: 250, gateW: 22 };          // arbetarens cell: tak 120, golv 250
+const BASIN = { bottom: 434, top: 120, cap: 100 };                          // nivå 0 = brädets överkant, nivå 100 = cellens tak
+const CHIN_FRAC = 0.80;                                                     // nivå där vattnet når hakan -> trampar vatten
+const OFFICE = { y: 830, h: 110 };                                          // 830..940
 const BAR = { y: 940, h: 60 };
 const CELL_CAP = 5;                                                         // liter per tomrum på brädet
+const COIN_VOL = 0.3;                                                       // liter ett mynt tränger undan
 
 // Sex sorters stenblock (bas, ljus kant, mörk kant)
 const STONES = [
@@ -104,10 +116,10 @@ const LOCKED_STONE = ['#5a5861', '#7b7984', '#3a3940'];
 let G;
 function newGame() {
   G = {
-    board: [], basin: 0, office: 0, score: 0, coins: 0, t: 0, over: false, won: false,
-    coinTimer: 0, coinInterval: S.coinInterval, rightUnlocked: S.leftPct <= 0,
+    board: [], water: 10, coinVol: 0, pile: 0, office: 0, score: 0, coins: 0, t: 0, over: false, won: false,
+    coinTimer: 1, coinInterval: S.coinInterval, unlocked: S.firstPct <= 0,
     particles: [], splashes: [], flashes: [], sel: null, drag: null, msg: '', msgT: 0,
-    power: { hammer: 3, bomb: 2, shuffle: 2 }, tool: null, pumpPhase: 0
+    power: { hammer: 3, bomb: 2, shuffle: 2 }, tool: null, pumpPhase: 0, treading: false
   };
   for (let r = 0; r < BOARD.rows; r++) {
     G.board[r] = [];
@@ -116,23 +128,27 @@ function newGame() {
       do { t = (Math.random() * NTYPES) | 0; }
       while ((c >= 2 && G.board[r][c - 1].t === t && G.board[r][c - 2].t === t) ||
              (r >= 2 && G.board[r - 1][c].t === t && G.board[r - 2][c].t === t));
-      G.board[r][c] = { t, w: 0 };           // t = -1 betyder tomrum; w = liter/CELL_CAP (0..1)
+      G.board[r][c] = { t, w: 0 };           // t = -1 betyder tomrum; w = andel vatten i tomrummet (0..1)
     }
   }
-  say('Rensa vänstra halvan så vattnet rinner undan!', 3);
+  say('Rensa högra halvan så vattnet rinner undan!', 3);
 }
 function say(m, sec) { G.msg = m; G.msgT = sec; }
 
 const isHole = (r, c) => G.board[r][c].t < 0;
 const inBoard = (r, c) => r >= 0 && r < BOARD.rows && c >= 0 && c < BOARD.cols;
-const isLocked = (r, c) => !G.rightUnlocked && c >= MID_COL;
+const isLocked = (r, c) => !G.unlocked && c < MID_COL;                  // vänstra halvan är låst först
 const wallBetween = (r, c1, c2) => r >= WALL_ROW && Math.min(c1, c2) === MID_COL - 1 && Math.max(c1, c2) === MID_COL;
+const isInletCol = c => c >= MID_COL;                                   // bassängens golv täcker vänstra halvan
+const isOutletCol = c => c < MID_COL;                                   // kontorets tak täcker högra halvan
 
-function leftSolvedPct() {
+function firstSolvedPct() {
   let n = 0;
-  for (let r = 0; r < BOARD.rows; r++) for (let c = 0; c < MID_COL; c++) if (isHole(r, c)) n++;
+  for (let r = 0; r < BOARD.rows; r++) for (let c = MID_COL; c < BOARD.cols; c++) if (isHole(r, c)) n++;
   return 100 * n / (BOARD.rows * MID_COL);
 }
+const levelFrac = () => Math.min(1, (G.water + G.coinVol) / BASIN.cap);
+const surfaceY = () => BASIN.bottom - (BASIN.bottom - BASIN.top) * levelFrac();
 
 // --- Matchning ---
 function findMatches() {
@@ -162,8 +178,8 @@ function clearCells(cells) {
     G.flashes.push({ r, c, t: 0.35 });
   }
   G.score += 10 * cells.length + (cells.length > 3 ? 20 : 0);
-  if (!G.rightUnlocked && leftSolvedPct() >= S.leftPct) {
-    G.rightUnlocked = true; say('Högra halvan upplåst!', 2.5);
+  if (!G.unlocked && firstSolvedPct() >= S.firstPct) {
+    G.unlocked = true; say('Vänstra halvan upplåst!', 2.5);
   }
   return cells.length;
 }
@@ -176,7 +192,7 @@ function hasMove() {
   for (let r = 0; r < BOARD.rows; r++) for (let c = 0; c < BOARD.cols; c++) {
     for (const [dr, dc] of [[0, 1], [1, 0]]) {
       const r2 = r + dr, c2 = c + dc;
-      if (!inBoard(r2, c2) || isLocked(r, c) || isLocked(r2, c2)) continue;
+      if (!inBoard(r2, c2) || isLocked(r, c) || isLocked(r2, c2) || wallBetween(r, c, c2)) continue;
       const a = G.board[r][c], b = G.board[r2][c2];
       if (a.t < 0 && b.t < 0) continue;
       if ((a.t < 0 || b.t < 0) && S.slide) return true;
@@ -204,13 +220,12 @@ function shuffleTiles() {
 function tryMove(r1, c1, r2, c2) {
   if (G.over || !inBoard(r1, c1) || !inBoard(r2, c2)) return;
   if (Math.abs(r1 - r2) + Math.abs(c1 - c2) !== 1) return;
-  if (isLocked(r1, c1) || isLocked(r2, c2)) { say('Högra halvan är låst – lös vänstra först (' + leftSolvedPct().toFixed(0) + '/' + S.leftPct + ' %)', 2); return; }
+  if (isLocked(r1, c1) || isLocked(r2, c2)) { say('Vänstra halvan är låst – lös högra först (' + firstSolvedPct().toFixed(0) + '/' + S.firstPct + ' %)', 2); return; }
   if (wallBetween(r1, c1, c2)) { say('Väggen är i vägen', 1.5); return; }
   const a = G.board[r1][c1], b = G.board[r2][c2];
   if (a.t < 0 && b.t < 0) return;
   const slide = a.t < 0 || b.t < 0;
   if (slide && !S.slide) { say('Skjut inte brickor i tomrum (avstängt)', 1.5); return; }
-  // byt – både typ och vatten följer med tomrummet
   [a.t, b.t] = [b.t, a.t]; [a.w, b.w] = [b.w, a.w];
   const n = resolveMatches();
   if (!slide && n === 0) { [a.t, b.t] = [b.t, a.t]; [a.w, b.w] = [b.w, a.w]; say('Ger ingen trea', 1); return; }
@@ -226,8 +241,8 @@ function useTool(r, c) {
   } else if (G.tool === 'bomb') {
     const cells = [];
     for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) {
-      const rr = r + dr, cc = c + dc;
-      if (inBoard(rr, cc) && !isHole(rr, cc) && !isLocked(rr, cc) && !wallBetween(rr, c, cc)) cells.push([rr, cc]);
+      const rr2 = r + dr, cc = c + dc;
+      if (inBoard(rr2, cc) && !isHole(rr2, cc) && !isLocked(rr2, cc) && !wallBetween(rr2, c, cc)) cells.push([rr2, cc]);
     }
     G.power.bomb--; clearCells(cells); G.tool = null; afterMove();
   }
@@ -235,15 +250,18 @@ function useTool(r, c) {
 
 // --- Vatten ---
 function simWater(dt) {
-  // mynt -> bassäng sköts av partiklarna; pump:
-  G.pumpPhase += dt * (G.basin > 0 ? 6 : 1);
-  G.basin = Math.max(0, G.basin - S.pumpRate * dt);
-  // bassäng -> översta raden i vänstra halvan
-  for (let c = 0; c < MID_COL; c++) {
+  // läckage in i hålan, pump ut (bara medan arbetaren når pumpen)
+  G.water = Math.min(BASIN.cap - G.coinVol, G.water + S.leakRate * dt);
+  G.treading = levelFrac() >= CHIN_FRAC;
+  G.pumpPhase += dt * (G.treading ? 7 : (G.water > 0 ? 6 : 1));
+  if (!G.treading) G.water = Math.max(0, G.water - S.pumpRate * dt);
+  // bassäng -> översta raden i inloppshalvan
+  for (let c = 0; c < BOARD.cols; c++) {
+    if (!isInletCol(c)) continue;
     const cell = G.board[0][c];
-    if (cell.t >= 0 || G.basin <= 0) continue;
-    const amt = Math.min(G.basin, (1 - cell.w) * CELL_CAP, 8 * dt * (G.basin / BASIN.cap + 0.2));
-    G.basin -= amt; cell.w += amt / CELL_CAP;
+    if (cell.t >= 0 || G.water <= 0) continue;
+    const amt = Math.min(G.water, (1 - cell.w) * CELL_CAP, 8 * dt * (levelFrac() + 0.2));
+    G.water -= amt; cell.w += amt / CELL_CAP;
   }
   // inom brädet, nerifrån och upp
   const maxDown = 3 * dt, maxSide = 2 * dt;
@@ -252,12 +270,11 @@ function simWater(dt) {
       const cell = G.board[r][c];
       if (cell.t >= 0 || cell.w <= 0) continue;
       if (r === BOARD.rows - 1) {
-        if (c >= MID_COL) { const amt = Math.min(cell.w, maxDown); cell.w -= amt; G.office += amt * CELL_CAP; }
+        if (isOutletCol(c)) { const amt = Math.min(cell.w, maxDown); cell.w -= amt; G.office += amt * CELL_CAP; }
       } else {
         const below = G.board[r + 1][c];
         if (below.t < 0 && below.w < 1) { const amt = Math.min(cell.w, 1 - below.w, maxDown); cell.w -= amt; below.w += amt; }
       }
-      // sidledes
       for (const dc of [-1, 1]) {
         const c2 = c + dc;
         if (!inBoard(r, c2) || wallBetween(r, c, c2)) continue;
@@ -269,22 +286,27 @@ function simWater(dt) {
     }
   }
   if (G.office >= S.goal && !G.over) { G.over = true; G.won = true; }
-  if (G.basin >= BASIN.cap && !G.over) { G.over = true; G.won = false; }
+  if (levelFrac() >= 1 && !G.over) { G.over = true; G.won = false; }
 }
 
-// --- Partiklar (mynt) ---
-function spawnCoin() {
-  const bill = Math.random() < 0.35;
-  G.particles.push({ x: 60 + Math.random() * 50, y: 135, vx: (Math.random() - 0.5) * 30, vy: 20 + Math.random() * 30, rot: Math.random() * 6, bill });
+// --- Mynt ---
+function spawnCoins() {
+  for (let i = 0; i < S.coinsPerDrop; i++) {
+    const bill = Math.random() < 0.3;
+    G.particles.push({ x: 50 + Math.random() * 70, y: 120 + Math.random() * 10, vx: (Math.random() - 0.5) * 40, vy: 10 + Math.random() * 40, rot: Math.random() * 6, bill, delay: i * 0.08 });
+  }
 }
-function surfaceY() { return BASIN.bottom - (BASIN.bottom - BASIN.top) * Math.min(1, G.basin / BASIN.cap); }
+function pileHeight() { return Math.min(150, Math.sqrt(G.pile) * 11); }
 function simParticles(dt) {
-  const sy = surfaceY();
+  const sy = surfaceY(), pileTop = BASIN.bottom - pileHeight();
   for (const p of G.particles) {
+    if (p.delay > 0) { p.delay -= dt; continue; }
     p.vy += 400 * dt; p.y += p.vy * dt; p.x += p.vx * dt; p.rot += dt * 3;
-    if (p.y >= sy - 4 && !p.done) {
-      p.done = true; G.basin = Math.min(BASIN.cap, G.basin + (p.bill ? 3 : 2)); G.coins++; G.score += 1;
-      G.splashes.push({ x: p.x, y: sy, t: 0.4 });
+    if (p.y >= sy - 4 && !p.wet) { p.wet = true; G.splashes.push({ x: p.x, y: sy, t: 0.4 }); p.vy *= 0.25; p.vx *= 0.3; }
+    if (p.wet) { p.vy = Math.min(p.vy, 60); }
+    if (p.y >= pileTop - 4 && !p.done) {
+      p.done = true; G.pile++; G.coins++; G.score += 1;
+      G.coinVol = Math.min(BASIN.cap, G.coinVol + (p.bill ? COIN_VOL * 1.5 : COIN_VOL));
     }
   }
   G.particles = G.particles.filter(p => !p.done);
@@ -299,7 +321,7 @@ function frame(ts) {
   if (!G.over) {
     G.t += dt;
     G.coinTimer -= dt;
-    if (G.coinTimer <= 0) { spawnCoin(); G.coinTimer = G.coinInterval; }
+    if (G.coinTimer <= 0) { spawnCoins(); G.coinTimer = G.coinInterval; }
     if (S.ramp) G.coinInterval = S.coinInterval * Math.pow(0.9, Math.floor(G.t / 20));
     simWater(dt);
   }
@@ -329,22 +351,58 @@ function water(x, y, w, h, alpha, t) {
   for (let i = 0; i <= w; i += 6) { const yy = y + Math.sin((x + i) / 14 + t * 4) * 1.8; i === 0 ? ctx.moveTo(x + i, yy) : ctx.lineTo(x + i, yy); }
   ctx.stroke();
 }
-
 function drawStone(x, y, col, selected, seed) {
-  const m = 3, s = BOARD.cell - 2 * m, b = 6;
-  ctx.fillStyle = col[2]; rr(x + m, y + m, s, s, 7); ctx.fill();                    // mörk kant (nedre/höger)
-  ctx.fillStyle = col[1]; rr(x + m, y + m, s - b, s - b, 7); ctx.fill();            // ljus kant (övre/vänster)
-  ctx.fillStyle = col[0]; rr(x + m + b / 2, y + m + b / 2, s - b, s - b, 5); ctx.fill(); // blockets yta
-  // sprickor/skrovlighet
+  const m = 2, s = BOARD.cell - 2 * m, b = 5;
+  ctx.fillStyle = col[2]; rr(x + m, y + m, s, s, 6); ctx.fill();                    // mörk kant (nedre/höger)
+  ctx.fillStyle = col[1]; rr(x + m, y + m, s - b, s - b, 6); ctx.fill();            // ljus kant (övre/vänster)
+  ctx.fillStyle = col[0]; rr(x + m + b / 2, y + m + b / 2, s - b, s - b, 4); ctx.fill(); // blockets yta
   ctx.strokeStyle = col[2]; ctx.lineWidth = 1.5; ctx.globalAlpha = 0.55;
   const k = seed % 4;
   ctx.beginPath();
-  if (k === 0) { ctx.moveTo(x + 14, y + 40); ctx.lineTo(x + 24, y + 30); ctx.lineTo(x + 30, y + 34); }
-  else if (k === 1) { ctx.moveTo(x + 38, y + 16); ctx.lineTo(x + 32, y + 26); ctx.lineTo(x + 40, y + 36); }
-  else if (k === 2) { ctx.moveTo(x + 16, y + 18); ctx.lineTo(x + 26, y + 22); ctx.moveTo(x + 36, y + 42); ctx.lineTo(x + 44, y + 38); }
-  else { ctx.moveTo(x + 20, y + 44); ctx.lineTo(x + 30, y + 40); ctx.lineTo(x + 34, y + 46); }
+  if (k === 0) { ctx.moveTo(x + 11, y + 32); ctx.lineTo(x + 19, y + 24); ctx.lineTo(x + 24, y + 27); }
+  else if (k === 1) { ctx.moveTo(x + 30, y + 13); ctx.lineTo(x + 26, y + 21); ctx.lineTo(x + 32, y + 29); }
+  else if (k === 2) { ctx.moveTo(x + 13, y + 14); ctx.lineTo(x + 21, y + 18); ctx.moveTo(x + 29, y + 34); ctx.lineTo(x + 35, y + 30); }
+  else { ctx.moveTo(x + 16, y + 35); ctx.lineTo(x + 24, y + 32); ctx.lineTo(x + 27, y + 37); }
   ctx.stroke(); ctx.globalAlpha = 1;
-  if (selected) { ctx.strokeStyle = '#ffeb3b'; ctx.lineWidth = 4; rr(x + m, y + m, s, s, 7); ctx.stroke(); }
+  if (selected) { ctx.strokeStyle = '#ffeb3b'; ctx.lineWidth = 3; rr(x + m, y + m, s, s, 6); ctx.stroke(); }
+}
+function drawCoin(x, y, bill, rot) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(rot);
+  if (bill) { ctx.fillStyle = '#7bd67b'; ctx.fillRect(-8, -4.5, 16, 9); ctx.fillStyle = '#2f7d32'; ctx.fillRect(-2.5, -2.5, 5, 5); }
+  else { ctx.fillStyle = '#f5c842'; ctx.beginPath(); ctx.arc(0, 0, 5, 0, Math.PI * 2); ctx.fill(); ctx.fillStyle = '#c99a2e'; ctx.beginPath(); ctx.arc(0, 0, 2.5, 0, Math.PI * 2); ctx.fill(); }
+  ctx.restore();
+}
+function drawWorker(t) {
+  const frac = levelFrac(), sy = surfaceY();
+  const arm = Math.sin(G.pumpPhase) * 0.6;
+  ctx.save();
+  if (G.treading) {
+    // flyter vid ytan och trampar vatten
+    ctx.translate(300, sy + 22 + Math.sin(t * 6) * 3);
+    ctx.scale(0.85, 0.85);
+    ctx.strokeStyle = '#e8dcc8'; ctx.lineWidth = 6; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(0, -20); ctx.lineTo(0, 10); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, 10); ctx.lineTo(-12 + Math.sin(t * 9) * 6, 36); ctx.moveTo(0, 10); ctx.lineTo(12 - Math.sin(t * 9) * 6, 36); ctx.stroke();
+    const flap = Math.sin(t * 10) * 14;
+    ctx.beginPath(); ctx.moveTo(0, -10); ctx.lineTo(-28, -4 + flap); ctx.moveTo(0, -10); ctx.lineTo(28, -4 - flap); ctx.stroke();
+    ctx.fillStyle = '#e8dcc8'; ctx.beginPath(); ctx.arc(0, -34, 13, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#6b4f2a'; ctx.fillRect(-14, -48, 28, 8);
+    ctx.fillStyle = '#222'; ctx.font = '12px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(frac > 0.92 ? '😱' : '😰', 0, -32);
+  } else {
+    ctx.translate(300, CELL.floor - 44);
+    ctx.scale(0.85, 0.85);
+    ctx.strokeStyle = '#e8dcc8'; ctx.lineWidth = 6; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(0, -20); ctx.lineTo(0, 20); ctx.stroke();                         // kropp
+    ctx.beginPath(); ctx.moveTo(0, 20); ctx.lineTo(-12, 50); ctx.moveTo(0, 20); ctx.lineTo(12, 50); ctx.stroke(); // ben
+    ctx.beginPath(); ctx.moveTo(0, -10); ctx.lineTo(28, -10 + arm * 25); ctx.stroke();             // arm mot pumpen
+    ctx.fillStyle = '#e8dcc8'; ctx.beginPath(); ctx.arc(0, -34, 13, 0, Math.PI * 2); ctx.fill();   // huvud
+    ctx.fillStyle = '#6b4f2a'; ctx.fillRect(-14, -48, 28, 8);                                       // keps
+    ctx.fillStyle = '#222'; ctx.font = '12px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(frac > 0.55 ? '😰' : '😓', 0, -32);
+    // pumpspaken
+    ctx.strokeStyle = '#d2338f'; ctx.lineWidth = 7;
+    ctx.beginPath(); ctx.moveTo(28, -10 + arm * 25); ctx.lineTo(62, -22 + arm * 10); ctx.stroke();
+  }
+  ctx.restore();
 }
 
 function draw() {
@@ -352,12 +410,13 @@ function draw() {
   ctx.clearRect(0, 0, W, H);
   ctx.fillStyle = '#15131a'; ctx.fillRect(0, 0, W, H);
 
-  // ---------- grottan ----------
-  rock(0, CAVE.top, W, BASIN.bottom + 20 - CAVE.top, 7);
-  // bassängens inre
-  ctx.fillStyle = '#1c2630'; ctx.fillRect(30, BASIN.top, 480, BASIN.bottom - BASIN.top);
-  // klockan
-  ctx.save(); ctx.translate(85, 95);
+  // ---------- berget och grottan ----------
+  rock(0, HUD_H, W, BASIN.bottom - HUD_H, 7);
+  ctx.fillStyle = '#1c2630'; ctx.fillRect(INNER.x, CAVE.ceiling, INNER.w, BASIN.bottom - CAVE.ceiling);
+  // bassängens golv över vänstra halvan (myntens hög ligger här) – smal stenlist
+  rock(INNER.x, BASIN.bottom - 8, MID_COL * BOARD.cell, 8, 41);
+  // klockan (hänger i taket)
+  ctx.save(); ctx.translate(85, 100);
   ctx.rotate(Math.sin(t * 5) * 0.08);
   ctx.fillStyle = '#c99a2e'; ctx.fillRect(-3, -30, 6, 14);
   ctx.fillStyle = '#f2c14e'; ctx.beginPath(); ctx.moveTo(-26, 22); ctx.quadraticCurveTo(-28, -18, 0, -18); ctx.quadraticCurveTo(28, -18, 26, 22); ctx.closePath(); ctx.fill();
@@ -365,62 +424,53 @@ function draw() {
   ctx.fillStyle = '#8a6a1e'; ctx.beginPath(); ctx.arc(0, 32, 6, 0, Math.PI * 2); ctx.fill();
   ctx.font = '22px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('📈', 0, 2);
   ctx.restore();
-  ctx.fillStyle = '#f2c14e'; ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('VINSTKLOCKAN', 85, 140);
 
-  // arbetarens cell (på en avsats i grottan)
-  const cellX = 250, cellW = 190, cellTop = BASIN.top;
-  ctx.fillStyle = '#241f28'; ctx.fillRect(cellX, cellTop, cellW, BASIN.bottom - cellTop);
-    // galler
-  ctx.strokeStyle = '#8c8793'; ctx.lineWidth = 4;
-  for (let i = 0; i < 6; i++) { ctx.beginPath(); ctx.moveTo(cellX + 6 + i * 11, cellTop); ctx.lineTo(cellX + 6 + i * 11, BASIN.bottom); ctx.stroke(); }
-  // stege
-  ctx.strokeStyle = '#a0763c'; ctx.lineWidth = 3;
-  ctx.beginPath(); ctx.moveTo(cellX - 30, 180); ctx.lineTo(cellX - 30, BASIN.bottom); ctx.moveTo(cellX - 16, 180); ctx.lineTo(cellX - 16, BASIN.bottom); ctx.stroke();
-  for (let y = 190; y < BASIN.bottom; y += 14) { ctx.beginPath(); ctx.moveTo(cellX - 30, y); ctx.lineTo(cellX - 16, y); ctx.stroke(); }
-  // arbetare
-  const panic = G.basin / BASIN.cap;
-  const arm = Math.sin(G.pumpPhase) * 0.6;
-  ctx.save(); ctx.translate(345, 250);
-  ctx.strokeStyle = '#e8dcc8'; ctx.lineWidth = 6; ctx.lineCap = 'round';
-  ctx.beginPath(); ctx.moveTo(0, -20); ctx.lineTo(0, 20); ctx.stroke();                         // kropp
-  ctx.beginPath(); ctx.moveTo(0, 20); ctx.lineTo(-12, 48); ctx.moveTo(0, 20); ctx.lineTo(12, 48); ctx.stroke(); // ben
-  ctx.beginPath(); ctx.moveTo(0, -10); ctx.lineTo(28, -10 + arm * 25); ctx.stroke();             // arm mot pumpen
-  ctx.fillStyle = '#e8dcc8'; ctx.beginPath(); ctx.arc(0, -34, 13, 0, Math.PI * 2); ctx.fill();   // huvud
-  ctx.fillStyle = '#6b4f2a'; ctx.fillRect(-14, -48, 28, 8);                                       // keps
-  ctx.fillStyle = '#222'; ctx.font = '12px sans-serif'; ctx.textAlign = 'center'; ctx.fillText(panic > 0.6 ? '😰' : '😓', 0, -32);
-  // pump
-  ctx.strokeStyle = '#d2338f'; ctx.lineWidth = 7;
-  ctx.beginPath(); ctx.moveTo(28, -10 + arm * 25); ctx.lineTo(62, -22 + arm * 10); ctx.stroke();
-  ctx.fillStyle = '#d2338f'; rr(58, -16, 14, 60, 5); ctx.fill();
-  ctx.restore();
-  // rör från pumpen till höger kant
+  // arbetarens cell: väggar, tak, golv, gallergrind
+  ctx.fillStyle = '#241f28'; ctx.fillRect(CELL.x, CELL.top, CELL.w, CELL.floor - CELL.top);
+  rock(CELL.x - 6, CELL.top - 10, CELL.w + 36, 10, 13);                 // taket (drunkningsgränsen)
+  rock(CELL.x + CELL.w, CELL.top, 30, CELL.floor - CELL.top, 19);        // bergvägg till höger om cellen
+  rock(CELL.x - 6, CELL.floor, CELL.w + 36, 12, 23);                     // golvet arbetaren står på
+  // gallergrinden i cellens vänstra sida
+  ctx.strokeStyle = '#8c8793'; ctx.lineWidth = 3;
+  for (let i = 0; i <= 2; i++) { const gx = CELL.x + 3 + i * (CELL.gateW / 2); ctx.beginPath(); ctx.moveTo(gx, CELL.top); ctx.lineTo(gx, CELL.floor); ctx.stroke(); }
+  for (let y = CELL.top + 10; y < CELL.floor; y += 18) { ctx.beginPath(); ctx.moveTo(CELL.x, y); ctx.lineTo(CELL.x + CELL.gateW + 4, y); ctx.stroke(); }
+  // pumpen och röret
+  ctx.fillStyle = '#d2338f'; rr(CELL.x + 148, CELL.floor - 60, 14, 60, 5); ctx.fill();
   ctx.strokeStyle = '#9a98a3'; ctx.lineWidth = 12; ctx.lineCap = 'butt';
-  ctx.beginPath(); ctx.moveTo(410, 240); ctx.lineTo(410, 190); ctx.lineTo(530, 190); ctx.lineTo(530, 215); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(CELL.x + 180, CELL.floor - 10); ctx.lineTo(CELL.x + 180, 145); ctx.lineTo(530, 145); ctx.lineTo(530, 170); ctx.stroke();
   ctx.strokeStyle = '#c4c2cc'; ctx.lineWidth = 4;
-  ctx.beginPath(); ctx.moveTo(410, 240); ctx.lineTo(410, 190); ctx.lineTo(530, 190); ctx.stroke();
-  // vattnet i bassängen – ritas efter cellen och arbetaren så att han står i vattnet
-  const sy = surfaceY();
-  water(30, sy, 480, BASIN.bottom - sy, 0.62, t);
-  if (G.basin > 0) { ctx.fillStyle = 'rgba(40,140,220,.62)'; ctx.fillRect(30, BASIN.bottom, 240, BOARD.y - BASIN.bottom); }
+  ctx.beginPath(); ctx.moveTo(CELL.x + 180, CELL.floor - 10); ctx.lineTo(CELL.x + 180, 145); ctx.lineTo(530, 145); ctx.stroke();
+  drawWorker(t);
   // vattnet som forsar ut ur spelet
-  if (G.basin > 0 && S.pumpRate > 0) {
+  if (G.water > 0 && S.pumpRate > 0 && !G.treading) {
     ctx.strokeStyle = 'rgba(120,200,255,.85)'; ctx.lineWidth = 6 + Math.sin(t * 20) * 2;
-    ctx.beginPath(); ctx.moveTo(530, 215);
-    for (let y = 215; y < H - BAR.h; y += 12) ctx.lineTo(530 + Math.sin(y / 9 + t * 25) * 4 + (y - 215) * 0.02, y);
+    ctx.beginPath(); ctx.moveTo(530, 170);
+    for (let y = 170; y < BAR.y; y += 12) ctx.lineTo(530 + Math.sin(y / 9 + t * 25) * 4 + (y - 170) * 0.015, y);
     ctx.stroke();
   }
-  // golvet över högra halvan av bassängen (sten) och under arbetaren
-  rock(250, BASIN.bottom, 290, BOARD.y - BASIN.bottom, 3);
-  rock(0, BASIN.bottom, 30, BOARD.y - BASIN.bottom, 5);
-  rock(0, 0, 30, H - BAR.h, 11); // vänster kant
-  // mynt
-  for (const p of G.particles) {
-    ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.rot);
-    if (p.bill) { ctx.fillStyle = '#7bd67b'; ctx.fillRect(-9, -5, 18, 10); ctx.fillStyle = '#2f7d32'; ctx.fillRect(-3, -3, 6, 6); }
-    else { ctx.fillStyle = '#f5c842'; ctx.beginPath(); ctx.arc(0, 0, 6, 0, Math.PI * 2); ctx.fill(); ctx.fillStyle = '#c99a2e'; ctx.beginPath(); ctx.arc(0, 0, 3, 0, Math.PI * 2); ctx.fill(); }
-    ctx.restore();
+  // mynthögen på bassängens golv (vänstra halvan)
+  const ph = pileHeight();
+  if (ph > 0) {
+    const px0 = INNER.x, pw = MID_COL * BOARD.cell, base = BASIN.bottom - 8;
+    ctx.fillStyle = '#b8902a'; ctx.beginPath(); ctx.moveTo(px0, base);
+    ctx.quadraticCurveTo(px0 + pw * 0.35, base - ph * 1.7, px0 + pw, base); ctx.closePath(); ctx.fill();
+    let i = 0;
+    for (let row = 0; row * 8 < ph; row++) {
+      const y = base - 5 - row * 8, frac = 1 - (row * 8) / ph;
+      const half = pw * 0.5 * Math.sqrt(Math.max(0, frac));
+      const cx = px0 + pw * 0.35;
+      for (let x = cx - half; x <= cx + half; x += 10) { drawCoin(x + (row % 2) * 5, y, (i++ % 7) === 3, 0); }
+    }
   }
+  // fallande mynt
+  for (const p of G.particles) if (p.delay <= 0) drawCoin(p.x, p.y, p.bill, p.rot);
+  // vattnet – ritas framför arbetaren och högen
+  const sy = surfaceY();
+  water(INNER.x, sy, INNER.w, BASIN.bottom - sy, 0.6, t);
   for (const s of G.splashes) { ctx.strokeStyle = `rgba(220,245,255,${s.t * 2})`; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(s.x, s.y, (0.4 - s.t) * 40, Math.PI, 0); ctx.stroke(); }
+  rock(0, HUD_H, 30, BASIN.bottom - HUD_H, 11); rock(W - 30, HUD_H, 30, 145 - HUD_H, 43); rock(W - 30, 180, 30, BASIN.bottom - 180, 47);
+  // berg över bassängen vid cellen – sluter taket mot berget
+  rock(CELL.x + CELL.w + 30, CAVE.ceiling, 30, CELL.top - CAVE.ceiling, 53);
 
   // ---------- spelplanen ----------
   ctx.fillStyle = '#1f2a33'; ctx.fillRect(BOARD.x, BOARD.y, BOARD.w, BOARD.h);
@@ -431,83 +481,71 @@ function draw() {
       if (cell.w > 0.005) { const h = cell.w * BOARD.cell; ctx.fillStyle = 'rgba(40,140,220,.75)'; ctx.fillRect(x, y + BOARD.cell - h, BOARD.cell, h); }
       continue;
     }
-    const locked = isLocked(r, c);
     const selected = G.sel && G.sel[0] === r && G.sel[1] === c;
-    drawStone(x, y, locked ? LOCKED_STONE : STONES[cell.t], selected, r * 31 + c * 17);
+    drawStone(x, y, isLocked(r, c) ? LOCKED_STONE : STONES[cell.t], selected, r * 31 + c * 17);
   }
   for (const f of G.flashes) { ctx.fillStyle = `rgba(255,255,200,${f.t * 2})`; ctx.fillRect(BOARD.x + f.c * BOARD.cell, BOARD.y + f.r * BOARD.cell, BOARD.cell, BOARD.cell); }
-  if (!G.rightUnlocked) {
-    ctx.fillStyle = 'rgba(0,0,0,.35)'; ctx.fillRect(BOARD.x + MID_COL * BOARD.cell, BOARD.y, BOARD.w / 2, BOARD.h);
-    ctx.fillStyle = '#fff'; ctx.font = 'bold 18px sans-serif'; ctx.textAlign = 'center';
-    ctx.fillText('🔒 ' + leftSolvedPct().toFixed(0) + ' / ' + S.leftPct + ' %', BOARD.x + MID_COL * BOARD.cell + BOARD.w / 4, BOARD.y + BOARD.h / 2);
+  if (!G.unlocked) {
+    ctx.fillStyle = 'rgba(0,0,0,.35)'; ctx.fillRect(BOARD.x, BOARD.y, BOARD.w / 2, BOARD.h);
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 18px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('🔒 ' + firstSolvedPct().toFixed(0) + ' / ' + S.firstPct + ' %', BOARD.x + BOARD.w / 4, BOARD.y + BOARD.h / 2);
   }
-  // rutnät
   ctx.strokeStyle = 'rgba(255,255,255,.06)'; ctx.lineWidth = 1;
   for (let i = 0; i <= BOARD.cols; i++) { ctx.beginPath(); ctx.moveTo(BOARD.x + i * BOARD.cell, BOARD.y); ctx.lineTo(BOARD.x + i * BOARD.cell, BOARD.y + BOARD.h); ctx.stroke(); }
   for (let i = 0; i <= BOARD.rows; i++) { ctx.beginPath(); ctx.moveTo(BOARD.x, BOARD.y + i * BOARD.cell); ctx.lineTo(BOARD.x + BOARD.w, BOARD.y + i * BOARD.cell); ctx.stroke(); }
-  // halvväggen
+  // halvväggen (från golvet upp till mitten)
   const wx = BOARD.x + MID_COL * BOARD.cell;
-  rock(wx - 5, BOARD.y + WALL_ROW * BOARD.cell, 10, BOARD.h / 2 + 12, 17);
-  // golv/tak över kontorets vänstra halva
-  rock(BOARD.x - 30, BOARD.y + BOARD.h, MID_COL * BOARD.cell + 30, OFFICE.y - (BOARD.y + BOARD.h), 23);
-  // högra sidan: kanten
-  rock(BOARD.x + BOARD.w, BOARD.y, 30, BOARD.h, 29);
+  rock(wx - 4, BOARD.y + WALL_ROW * BOARD.cell, 8, BOARD.h / 2 + 12, 17);
+  // golv/tak över kontorets högra halva
+  rock(wx, BOARD.y + BOARD.h, BOARD.w / 2 + 30, OFFICE.y - (BOARD.y + BOARD.h), 29);
+  rock(0, BOARD.y, 30, BOARD.h, 31); rock(BOARD.x + BOARD.w, BOARD.y, 30, BOARD.h, 37);
 
   // ---------- kontoret ----------
-  ctx.fillStyle = '#5a1f28'; ctx.fillRect(BOARD.x, OFFICE.y, BOARD.w, OFFICE.h);            // tapet
+  ctx.fillStyle = '#5a1f28'; ctx.fillRect(BOARD.x, OFFICE.y, BOARD.w, OFFICE.h);
   ctx.fillStyle = '#7a2f3a'; for (let i = 0; i < 480; i += 40) ctx.fillRect(BOARD.x + i, OFFICE.y, 20, OFFICE.h);
-  ctx.fillStyle = '#3b2616'; ctx.fillRect(BOARD.x, OFFICE.y + OFFICE.h - 16, BOARD.w, 16);   // golv
-  // fönster med stad
-  ctx.fillStyle = '#243a5e'; rr(400, OFFICE.y + 14, 80, 60, 8); ctx.fill();
-  ctx.fillStyle = '#152238'; for (let i = 0; i < 5; i++) ctx.fillRect(406 + i * 15, OFFICE.y + 40 + (i % 2) * 10, 10, 34 - (i % 2) * 10);
-  // tavla
-  ctx.fillStyle = '#d9b76a'; rr(50, OFFICE.y + 12, 70, 44, 4); ctx.fill(); ctx.fillStyle = '#fff'; ctx.fillRect(54, OFFICE.y + 16, 62, 36);
-  ctx.strokeStyle = '#2e9d4a'; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(58, OFFICE.y + 46); ctx.lineTo(75, OFFICE.y + 36); ctx.lineTo(90, OFFICE.y + 40); ctx.lineTo(112, OFFICE.y + 20); ctx.stroke();
-  // skrivbord
-  ctx.fillStyle = '#4e2f16'; rr(60, OFFICE.y + 84, 190, 14, 4); ctx.fill(); ctx.fillRect(70, OFFICE.y + 98, 14, 26); ctx.fillRect(236, OFFICE.y + 98, 14, 26);
-  // myntstaplar
-  for (let i = 0; i < 5; i++) for (let j = 0; j < 3 + (i % 3); j++) {
-    ctx.fillStyle = j % 2 ? '#f5c842' : '#e0b030'; rr(280 + i * 34, OFFICE.y + OFFICE.h - 24 - j * 7, 28, 7, 3); ctx.fill();
-  }
-  for (let i = 0; i < 3; i++) for (let j = 0; j < 2 + i; j++) { ctx.fillStyle = j % 2 ? '#f5c842' : '#e0b030'; rr(100 + i * 32, OFFICE.y + 74 - j * 7, 26, 7, 3); ctx.fill(); }
-  // Krösus
+  ctx.fillStyle = '#3b2616'; ctx.fillRect(BOARD.x, OFFICE.y + OFFICE.h - 14, BOARD.w, 14);
+  ctx.fillStyle = '#243a5e'; rr(420, OFFICE.y + 10, 70, 50, 8); ctx.fill();                                 // fönster
+  ctx.fillStyle = '#152238'; for (let i = 0; i < 5; i++) ctx.fillRect(425 + i * 13, OFFICE.y + 30 + (i % 2) * 8, 9, 30 - (i % 2) * 8);
+  ctx.fillStyle = '#d9b76a'; rr(150, OFFICE.y + 10, 60, 38, 4); ctx.fill(); ctx.fillStyle = '#fff'; ctx.fillRect(154, OFFICE.y + 14, 52, 30); // tavla
+  ctx.strokeStyle = '#2e9d4a'; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(158, OFFICE.y + 40); ctx.lineTo(172, OFFICE.y + 30); ctx.lineTo(186, OFFICE.y + 34); ctx.lineTo(202, OFFICE.y + 18); ctx.stroke();
+  ctx.fillStyle = '#4e2f16'; rr(230, OFFICE.y + 68, 170, 12, 4); ctx.fill(); ctx.fillRect(238, OFFICE.y + 80, 12, 18); ctx.fillRect(380, OFFICE.y + 80, 12, 18); // skrivbord
+  for (let i = 0; i < 4; i++) for (let j = 0; j < 2 + (i % 3); j++) { ctx.fillStyle = j % 2 ? '#f5c842' : '#e0b030'; rr(250 + i * 30, OFFICE.y + 62 - j * 6, 24, 6, 3); ctx.fill(); }
+  for (let i = 0; i < 3; i++) for (let j = 0; j < 3 + i; j++) { ctx.fillStyle = j % 2 ? '#f5c842' : '#e0b030'; rr(60 + i * 30, OFFICE.y + OFFICE.h - 20 - j * 6, 24, 6, 3); ctx.fill(); }
   const wet = G.office / S.goal;
-  ctx.save(); ctx.translate(160, OFFICE.y + 60);
-  ctx.fillStyle = '#8b1e2d'; ctx.beginPath(); ctx.ellipse(0, 40, 46, 34, 0, Math.PI, 0); ctx.fill();   // stol
-  ctx.fillStyle = '#1f1f2e'; ctx.beginPath(); ctx.ellipse(0, 20, 34, 30, 0, 0, Math.PI * 2); ctx.fill(); // kostym/mage
-  ctx.fillStyle = '#c9202b'; ctx.fillRect(-6, -6, 12, 30);                                            // slips
-  ctx.fillStyle = '#f1c9a5'; ctx.beginPath(); ctx.arc(0, -18, 20, 0, Math.PI * 2); ctx.fill();        // huvud
-  ctx.fillStyle = '#111'; ctx.fillRect(-16, -44, 32, 10); ctx.fillRect(-11, -62, 22, 20);            // hatt
-  ctx.strokeStyle = '#111'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(8, -20, 6, 0, Math.PI * 2); ctx.stroke(); // monokel
-  ctx.fillStyle = '#333'; ctx.fillRect(-12, -9, 24, 4);                                               // mustasch
-  ctx.font = '14px sans-serif'; ctx.textAlign = 'center'; ctx.fillStyle = '#000';
+  ctx.save(); ctx.translate(320, OFFICE.y + 52); ctx.scale(0.8, 0.8);
+  ctx.fillStyle = '#8b1e2d'; ctx.beginPath(); ctx.ellipse(0, 40, 46, 34, 0, Math.PI, 0); ctx.fill();
+  ctx.fillStyle = '#1f1f2e'; ctx.beginPath(); ctx.ellipse(0, 20, 34, 30, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#c9202b'; ctx.fillRect(-6, -6, 12, 30);
+  ctx.fillStyle = '#f1c9a5'; ctx.beginPath(); ctx.arc(0, -18, 20, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#111'; ctx.fillRect(-16, -44, 32, 10); ctx.fillRect(-11, -62, 22, 20);
+  ctx.strokeStyle = '#111'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(8, -20, 6, 0, Math.PI * 2); ctx.stroke();
+  ctx.font = '14px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#000';
   ctx.fillText(wet > 0.6 ? '😱' : wet > 0.25 ? '😠' : '😏', 0, -16);
-  ctx.fillStyle = '#f5c842'; ctx.font = 'bold 11px sans-serif'; ctx.fillText('KRÖSUS', 0, 62);
   ctx.restore();
-  // vatten som forsar ner från högra halvan
-  for (let c = MID_COL; c < BOARD.cols; c++) {
+  ctx.fillStyle = '#f5c842'; ctx.font = 'bold 11px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('KRÖSUS', 320, OFFICE.y + 104);
+  // vatten som forsar ner från vänstra halvan
+  for (let c = 0; c < BOARD.cols; c++) {
     const cell = G.board[BOARD.rows - 1][c];
-    if (cell.t < 0 && cell.w > 0.02) {
+    if (isOutletCol(c) && cell.t < 0 && cell.w > 0.02) {
       ctx.fillStyle = `rgba(60,160,240,${Math.min(0.8, cell.w)})`;
-      const x = BOARD.x + c * BOARD.cell + 20; ctx.fillRect(x, BOARD.y + BOARD.h, 20, OFFICE.y + OFFICE.h - (BOARD.y + BOARD.h));
+      ctx.fillRect(BOARD.x + c * BOARD.cell + 16, BOARD.y + BOARD.h, 16, OFFICE.y + OFFICE.h - (BOARD.y + BOARD.h));
     }
   }
-  // kontorets vattennivå
   const oh = OFFICE.h * Math.min(1, G.office / S.goal);
   water(BOARD.x, OFFICE.y + OFFICE.h - oh, BOARD.w, oh, 0.55, t);
   rock(0, OFFICE.y, 30, OFFICE.h, 31); rock(BOARD.x + BOARD.w, OFFICE.y, 30, OFFICE.h, 37);
 
   // ---------- HUD ----------
-  ctx.fillStyle = '#1e1b24'; ctx.fillRect(0, 0, W, CAVE.top);
+  const frac = levelFrac();
+  ctx.fillStyle = '#1e1b24'; ctx.fillRect(0, 0, W, HUD_H);
   ctx.textBaseline = 'middle'; ctx.textAlign = 'left'; ctx.fillStyle = '#f5e9c8'; ctx.font = 'bold 20px sans-serif';
-  ctx.fillText('ZooDoom', 14, 22);
+  ctx.fillText('ZooDoom', 14, 20);
   ctx.font = '14px sans-serif'; ctx.fillStyle = '#ddd';
-  ctx.fillText('Poäng ' + G.score + '   Mynt ' + G.coins + '   Tid ' + G.t.toFixed(0) + ' s', 14, 44);
-  // bassängnivå
-  ctx.textAlign = 'right'; ctx.fillText('Bassäng', 526, 14);
-  ctx.fillStyle = '#333'; rr(386, 22, 140, 10, 5); ctx.fill();
-  ctx.fillStyle = panic > 0.75 ? '#e53935' : '#42a5f5'; rr(386, 22, 140 * Math.min(1, panic), 10, 5); ctx.fill();
-  ctx.fillStyle = '#ddd'; ctx.fillText('Kontoret ' + G.office.toFixed(0) + ' / ' + S.goal + ' l', 526, 46);
+  ctx.fillText('Poäng ' + G.score + '   Mynt ' + G.coins + '   Tid ' + G.t.toFixed(0) + ' s', 14, 42);
+  ctx.textAlign = 'right'; ctx.fillText('Vattennivå', 526, 13);
+  ctx.fillStyle = '#333'; rr(386, 21, 140, 10, 5); ctx.fill();
+  ctx.fillStyle = frac > CHIN_FRAC ? '#e53935' : '#42a5f5'; rr(386, 21, 140 * frac, 10, 5); ctx.fill();
+  ctx.fillStyle = '#ddd'; ctx.fillText('Kontoret ' + G.office.toFixed(0) + ' / ' + S.goal + ' l', 526, 43);
 
   // ---------- verktygsrad ----------
   ctx.fillStyle = '#1e1b24'; ctx.fillRect(0, BAR.y, W, BAR.h);
@@ -523,27 +561,25 @@ function draw() {
   ctx.fillStyle = '#3a3642'; rr(430, BAR.y + 8, 96, 44, 10); ctx.fill();
   ctx.font = '26px sans-serif'; ctx.fillStyle = '#000'; ctx.fillText('⚙️', 478, BAR.y + 31);
 
-  // meddelande
   if (G.msgT > 0 && G.msg) {
     ctx.font = 'bold 16px sans-serif'; ctx.textAlign = 'center';
     const tw = ctx.measureText(G.msg).width + 24;
-    ctx.fillStyle = 'rgba(0,0,0,.75)'; rr(W / 2 - tw / 2, BOARD.y - 40 + 6, tw, 30, 8); ctx.fill();
-    ctx.fillStyle = '#ffeb3b'; ctx.fillText(G.msg, W / 2, BOARD.y - 40 + 21);
+    ctx.fillStyle = 'rgba(0,0,0,.75)'; rr(W / 2 - tw / 2, BOARD.y + 8, tw, 30, 8); ctx.fill();
+    ctx.fillStyle = '#ffeb3b'; ctx.fillText(G.msg, W / 2, BOARD.y + 23);
   }
-  // slut
   if (G.over) {
     ctx.fillStyle = 'rgba(0,0,0,.72)'; ctx.fillRect(0, 0, W, H);
     ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.font = 'bold 34px sans-serif';
     ctx.fillText(G.won ? 'Kontoret översvämmat!' : 'Arbetaren drunknade', W / 2, H / 2 - 50);
     ctx.font = '18px sans-serif';
-    ctx.fillText(G.won ? 'Krösus fick sig ett bad. Poäng: ' + G.score : 'Bassängen blev full. Poäng: ' + G.score, W / 2, H / 2);
+    ctx.fillText(G.won ? 'Krösus fick sig ett bad. Poäng: ' + G.score : 'Vattnet nådde taket. Poäng: ' + G.score, W / 2, H / 2);
     ctx.fillStyle = '#f0b429'; rr(W / 2 - 90, H / 2 + 40, 180, 50, 12); ctx.fill();
     ctx.fillStyle = '#000'; ctx.font = 'bold 20px sans-serif'; ctx.fillText('Spela igen', W / 2, H / 2 + 66);
   }
 }
 
 // --- Input ---
-let scale = 1, offX = 0, offY = 0;
+let scale = 1;
 function resize() {
   const wrap = document.getElementById('wrap');
   const aw = wrap.clientWidth, ah = wrap.clientHeight;
@@ -579,7 +615,7 @@ canvas.addEventListener('pointerdown', e => {
 canvas.addEventListener('pointermove', e => {
   if (!G.drag) return;
   const p = pos(e), dx = p.x - G.drag.x, dy = p.y - G.drag.y;
-  if (Math.hypot(dx, dy) < 22) return;
+  if (Math.hypot(dx, dy) < 18) return;
   const d = Math.abs(dx) > Math.abs(dy) ? [0, Math.sign(dx)] : [Math.sign(dy), 0];
   tryMove(G.drag.r, G.drag.c, G.drag.r + d[0], G.drag.c + d[1]);
   G.sel = null; G.drag = null;
@@ -589,16 +625,21 @@ canvas.addEventListener('pointerup', () => { G.drag = null; });
 // --- Inställningar ---
 const $ = id => document.getElementById(id);
 function openSettings() {
-  $('s_left').value = S.leftPct; $('s_coin').value = S.coinInterval; $('s_pump').value = S.pumpRate; $('s_goal').value = S.goal;
+  $('s_first').value = S.firstPct; $('s_coin').value = S.coinInterval; $('s_coins').value = S.coinsPerDrop;
+  $('s_leak').value = S.leakRate; $('s_pump').value = S.pumpRate; $('s_goal').value = S.goal;
   $('s_ramp').checked = S.ramp; $('s_slide').checked = S.slide; showVals();
   $('settings').style.display = 'flex';
 }
-function showVals() { $('v_left').textContent = $('s_left').value + ' %'; $('v_coin').textContent = $('s_coin').value + ' s'; $('v_pump').textContent = $('s_pump').value; $('v_goal').textContent = $('s_goal').value; }
-['s_left', 's_coin', 's_pump', 's_goal'].forEach(id => $(id).addEventListener('input', showVals));
+function showVals() {
+  $('v_first').textContent = $('s_first').value + ' %'; $('v_coin').textContent = $('s_coin').value + ' s'; $('v_coins').textContent = $('s_coins').value;
+  $('v_leak').textContent = $('s_leak').value; $('v_pump').textContent = $('s_pump').value; $('v_goal').textContent = $('s_goal').value;
+}
+['s_first', 's_coin', 's_coins', 's_leak', 's_pump', 's_goal'].forEach(id => $(id).addEventListener('input', showVals));
 $('b_close').onclick = () => $('settings').style.display = 'none';
 $('b_reset').onclick = () => { S = Object.assign({}, DEFAULTS); saveSettings(); openSettings(); };
 $('b_save').onclick = () => {
-  S = { leftPct: +$('s_left').value, coinInterval: +$('s_coin').value, pumpRate: +$('s_pump').value, goal: +$('s_goal').value, ramp: $('s_ramp').checked, slide: $('s_slide').checked };
+  S = { firstPct: +$('s_first').value, coinInterval: +$('s_coin').value, coinsPerDrop: +$('s_coins').value, leakRate: +$('s_leak').value,
+        pumpRate: +$('s_pump').value, goal: +$('s_goal').value, ramp: $('s_ramp').checked, slide: $('s_slide').checked };
   saveSettings(); $('settings').style.display = 'none'; newGame();
 };
 
