@@ -46,7 +46,7 @@
     <label class="row"><span>Mål: liter i kontoret</span><b id="v_goal"></b></label>
     <input type="range" id="s_goal" min="20" max="400" step="10">
 
-    <label class="row"><span>Svårigheten ökar var 20:e sekund</span><input type="checkbox" id="s_ramp"></label>
+    <label class="row"><span>Svårigheten ökar var 20:e sekund (tätare mynt, mer läckage)</span><input type="checkbox" id="s_ramp"></label>
     <label class="row"><span>Bricka får skjutas in i tomrum</span><input type="checkbox" id="s_slide"></label>
     <div class="hint">Av = bara klassiska byten som ger tre i rad.</div>
 
@@ -98,7 +98,25 @@ const CHIN_FRAC = 0.80;                                                     // n
 const OFFICE = { y: 830, h: 110 };                                          // 830..940
 const BAR = { y: 940, h: 60 };
 const CELL_CAP = 5;                                                         // liter per tomrum på brädet
-const COIN_VOL = 0.3;                                                       // liter ett mynt tränger undan
+// Mynthögen: varje mynt upptar PILE.area px² av bassängens tvärsnitt. Högen ligger mot vänster vägg
+// med en platt topp (flat) och sluttar sedan (slope). Högens area / bassängens area = andel av nivån.
+const PILE = { area: 80, slope: 0.7, flat: 12, maxH: BASIN.bottom - BASIN.top - 8, base: BASIN.bottom - 8 };
+const BASIN_AREA = INNER.w * (BASIN.bottom - BASIN.top);
+function areaForH(H) {
+  const run = Math.min(H / PILE.slope, INNER.w - PILE.flat);
+  return PILE.flat * H + H * run - PILE.slope * run * run / 2;
+}
+function pileH() {
+  const A = G.pile * PILE.area;
+  let lo = 0, hi = PILE.maxH;
+  if (areaForH(hi) <= A) return hi;
+  for (let i = 0; i < 22; i++) { const m = (lo + hi) / 2; if (areaForH(m) < A) lo = m; else hi = m; }
+  return hi;
+}
+function pileTopAt(x, H) {
+  const dx = x - INNER.x - PILE.flat;
+  return PILE.base - Math.max(0, dx <= 0 ? H : H - PILE.slope * dx);
+}
 
 // Sex sorters stenblock (bas, ljus kant, mörk kant)
 const STONES = [
@@ -251,7 +269,8 @@ function useTool(r, c) {
 // --- Vatten ---
 function simWater(dt) {
   // läckage in i hålan, pump ut (bara medan arbetaren når pumpen)
-  G.water = Math.min(BASIN.cap - G.coinVol, G.water + S.leakRate * dt);
+  const ramp = S.ramp ? Math.pow(1.1, Math.floor(G.t / 20)) : 1;
+  G.water = Math.min(BASIN.cap - G.coinVol, G.water + S.leakRate * ramp * dt);
   G.treading = levelFrac() >= CHIN_FRAC;
   G.pumpPhase += dt * (G.treading ? 7 : (G.water > 0 ? 6 : 1));
   if (!G.treading) G.water = Math.max(0, G.water - S.pumpRate * dt);
@@ -296,17 +315,16 @@ function spawnCoins() {
     G.particles.push({ x: 50 + Math.random() * 70, y: 120 + Math.random() * 10, vx: (Math.random() - 0.5) * 40, vy: 10 + Math.random() * 40, rot: Math.random() * 6, bill, delay: i * 0.08 });
   }
 }
-function pileHeight() { return Math.min(150, Math.sqrt(G.pile) * 11); }
 function simParticles(dt) {
-  const sy = surfaceY(), pileTop = BASIN.bottom - pileHeight();
+  const sy = surfaceY(), H = pileH();
   for (const p of G.particles) {
     if (p.delay > 0) { p.delay -= dt; continue; }
     p.vy += 400 * dt; p.y += p.vy * dt; p.x += p.vx * dt; p.rot += dt * 3;
     if (p.y >= sy - 4 && !p.wet) { p.wet = true; G.splashes.push({ x: p.x, y: sy, t: 0.4 }); p.vy *= 0.25; p.vx *= 0.3; }
     if (p.wet) { p.vy = Math.min(p.vy, 60); }
-    if (p.y >= pileTop - 4 && !p.done) {
-      p.done = true; G.pile++; G.coins++; G.score += 1;
-      G.coinVol = Math.min(BASIN.cap, G.coinVol + (p.bill ? COIN_VOL * 1.5 : COIN_VOL));
+    if (p.y >= pileTopAt(p.x, H) - 4 && !p.done) {
+      p.done = true; G.pile += p.bill ? 1.5 : 1; G.coins++; G.score += 1;
+      G.coinVol = BASIN.cap * Math.min(areaForH(PILE.maxH), G.pile * PILE.area) / BASIN_AREA;
     }
   }
   G.particles = G.particles.filter(p => !p.done);
@@ -448,18 +466,18 @@ function draw() {
     for (let y = 170; y < BAR.y; y += 12) ctx.lineTo(530 + Math.sin(y / 9 + t * 25) * 4 + (y - 170) * 0.015, y);
     ctx.stroke();
   }
-  // mynthögen på bassängens golv (vänstra halvan)
-  const ph = pileHeight();
-  if (ph > 0) {
-    const px0 = INNER.x, pw = MID_COL * BOARD.cell, base = BASIN.bottom - 8;
-    ctx.fillStyle = '#b8902a'; ctx.beginPath(); ctx.moveTo(px0, base);
-    ctx.quadraticCurveTo(px0 + pw * 0.35, base - ph * 1.7, px0 + pw, base); ctx.closePath(); ctx.fill();
+  // mynthögen mot bassängens vänstra vägg
+  const PH = pileH();
+  if (PH > 0) {
+    const x0 = INNER.x, base = PILE.base, run = Math.min(PH / PILE.slope, INNER.w - PILE.flat);
+    ctx.fillStyle = '#b8902a'; ctx.beginPath();
+    ctx.moveTo(x0, base); ctx.lineTo(x0, base - PH); ctx.lineTo(x0 + PILE.flat, base - PH);
+    ctx.lineTo(x0 + PILE.flat + run, base - PH + PILE.slope * run); ctx.lineTo(x0 + PILE.flat + run, base); ctx.closePath(); ctx.fill();
     let i = 0;
-    for (let row = 0; row * 8 < ph; row++) {
-      const y = base - 5 - row * 8, frac = 1 - (row * 8) / ph;
-      const half = pw * 0.5 * Math.sqrt(Math.max(0, frac));
-      const cx = px0 + pw * 0.35;
-      for (let x = cx - half; x <= cx + half; x += 10) { drawCoin(x + (row % 2) * 5, y, (i++ % 7) === 3, 0); }
+    for (let y = base - 5; y > base - PH; y -= 8) {
+      const right = Math.min(x0 + INNER.w - 5, x0 + PILE.flat + (PH - (base - y)) / PILE.slope);
+      const row = Math.round((base - y) / 8);
+      for (let x = x0 + 5 + (row % 2) * 5; x <= right; x += 10) drawCoin(x, y, (i++ % 7) === 3, 0);
     }
   }
   // fallande mynt
@@ -542,7 +560,7 @@ function draw() {
   ctx.fillText('ZooDoom', 14, 20);
   ctx.font = '14px sans-serif'; ctx.fillStyle = '#ddd';
   ctx.fillText('Poäng ' + G.score + '   Mynt ' + G.coins + '   Tid ' + G.t.toFixed(0) + ' s', 14, 42);
-  ctx.textAlign = 'right'; ctx.fillText('Vattennivå', 526, 13);
+  ctx.textAlign = 'right'; ctx.fillText('Nivå: vatten ' + G.water.toFixed(0) + ' + mynt ' + G.coinVol.toFixed(0), 526, 13);
   ctx.fillStyle = '#333'; rr(386, 21, 140, 10, 5); ctx.fill();
   ctx.fillStyle = frac > CHIN_FRAC ? '#e53935' : '#42a5f5'; rr(386, 21, 140 * frac, 10, 5); ctx.fill();
   ctx.fillStyle = '#ddd'; ctx.fillText('Kontoret ' + G.office.toFixed(0) + ' / ' + S.goal + ' l', 526, 43);

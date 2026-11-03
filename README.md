@@ -10,9 +10,10 @@ och den enda vägen undan är genom brädet du spelar på.
   sedlar – regnar ner i en vattenbassäng.
 - I en grotta ovanför bassängen står en inburad arbetare och pumpar vatten ur sin
   fängelsehåla; vattnet forsar ut genom ett rör i sidan av spelet.
-- Mynten samlas på hög på bassängens botten och trycker upp vattennivån. När vattnet
-  når arbetarens haka släpper han pumpen och trampar vatten; når det cellens tak
-  drunknar han och spelet är förlorat.
+- Mynten samlas på hög på bassängens botten och tränger undan vatten – nivån stiger
+  med exakt så mycket som högen tar plats. Dessutom läcker vatten in i hålan hela tiden.
+  När vattnet når arbetarens haka släpper han pumpen och trampar vatten; når det cellens
+  tak drunknar han och spelet är förlorat.
 - Under bassängen ligger en Zookeeper-liknande spelplan (10×8) med färgade stenblock.
   Bassängens golv täcker vänstra halvan, så vattnet kommer bara in via högra halvans
   överkant. Under högra halvan finns ett golv och en halvvägg går upp till mitten,
